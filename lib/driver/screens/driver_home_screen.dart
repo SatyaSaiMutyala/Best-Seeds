@@ -622,29 +622,6 @@ class _DriverDashboardState extends State<DriverDashboard> {
                 selectedTabIndex = index;
               });
               _filterRoutes();
-              // Simple scroll logic for 4 tabs
-              // if (_tabScrollController.hasClients) {
-              //   final maxScroll = _tabScrollController.position.maxScrollExtent;
-              //   if (maxScroll > 0) {
-              //     // Only scroll if content is scrollable
-              //     if (index == 0) {
-              //       // First tab - scroll to start
-              //       _tabScrollController.animateTo(
-              //         0,
-              //         duration: const Duration(milliseconds: 200),
-              //         curve: Curves.easeOut,
-              //       );
-              //     } else if (index == tabs.length - 1) {
-              //       // Last tab - scroll to end
-              //       _tabScrollController.animateTo(
-              //         maxScroll,
-              //         duration: const Duration(milliseconds: 200),
-              //         curve: Curves.easeOut,
-              //       );
-              //     }
-              //     // Middle tabs don't need scrolling - they're already visible
-              //   }
-              // }
             },
             child: Container(
               margin: EdgeInsets.symmetric(

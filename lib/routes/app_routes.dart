@@ -3,6 +3,7 @@ import 'package:bestseeds/driver/screens/driver_main_nav_screen.dart';
 import 'package:bestseeds/driver/screens/edit_profile_screen.dart';
 import 'package:bestseeds/driver/screens/login_screens/login_screen.dart';
 import 'package:bestseeds/driver/screens/login_screens/otp_verification_screen.dart';
+import 'package:bestseeds/driver/screens/my_deliveries_screen.dart';
 import 'package:bestseeds/employee/screens/edit_profile_screen.dart';
 import 'package:bestseeds/employee/screens/employee_main_nav_screen.dart';
 import 'package:bestseeds/employee/screens/login_screens/employee_login_screen.dart';
@@ -22,6 +23,7 @@ class AppRoutes {
   static const driverEditProfile = '/driverEditProfile';
   static const driverLocationSetup = '/driverLocationSetup';
   static const employeeLocationSetup = '/employeeLocationSetup';
+  static const driverMyDeliveries = '/driverMyDeliveries';
 
   static Route<dynamic> generateRoute(RouteSettings settings) {
     switch (settings.name) {
@@ -57,6 +59,10 @@ class AppRoutes {
       case driverEditProfile:
         return MaterialPageRoute(
             builder: (_) => const DriverEditProfileScreen());
+
+      case driverMyDeliveries:
+        return MaterialPageRoute(
+            builder: (_) => const MyDeliveriesScreen());
 
       default:
         return MaterialPageRoute(

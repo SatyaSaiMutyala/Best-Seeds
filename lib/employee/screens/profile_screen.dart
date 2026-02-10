@@ -6,6 +6,7 @@ import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:bestseeds/widgets/profile_menu_item.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:share_plus/share_plus.dart';
 
 class EmployeeProfileScreen extends StatelessWidget {
   EmployeeProfileScreen({super.key});
@@ -67,7 +68,11 @@ class EmployeeProfileScreen extends StatelessWidget {
                     ProfileMenuItem(
                       icon: Icons.share_outlined,
                       title: 'Share this app',
-                      onTap: () {},
+                      onTap: () {
+                        Share.share(
+                          'Check out Best Seeds - the best app for seed delivery management!\nhttps://play.google.com/store/apps/details?id=com.bestseeds.app',
+                        );
+                      },
                     ),
                     ProfileMenuItem(
                       icon: Icons.description_outlined,

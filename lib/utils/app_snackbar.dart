@@ -40,6 +40,17 @@ class AppSnackbar {
   }
 }
 
+void toast(String message) {
+  Get.rawSnackbar(
+    message: message,
+    snackPosition: SnackPosition.BOTTOM,
+    backgroundColor: Colors.red.shade600,
+    margin: const EdgeInsets.all(16),
+    borderRadius: 12,
+    duration: const Duration(seconds: 2),
+  );
+}
+
 String extractErrorMessage(dynamic error) {
   if (error == null) return 'Something went wrong';
 

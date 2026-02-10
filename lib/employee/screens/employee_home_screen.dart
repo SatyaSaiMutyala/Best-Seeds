@@ -3,6 +3,7 @@ import 'package:bestseeds/employee/models/booking_model.dart';
 import 'package:bestseeds/employee/repository/auth_repository.dart';
 import 'package:bestseeds/employee/screens/edit_hatchery_details_screen.dart';
 import 'package:bestseeds/employee/screens/vehicle_tracking_map_screen.dart';
+import 'package:bestseeds/employee/screens/employee_main_nav_screen.dart';
 import 'package:bestseeds/employee/services/storage_service.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:flutter/material.dart';
@@ -456,7 +457,10 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
             onTap: () {},
           ),
           SizedBox(width: width * 0.02),
-          _buildProfileAvatar(width),
+          GestureDetector(
+            onTap: () => Get.find<EmployeeNavController>().goToProfile(),
+            child: _buildProfileAvatar(width),
+          ),
         ],
       ),
     );

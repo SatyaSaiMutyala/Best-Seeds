@@ -1,8 +1,10 @@
 import 'package:bestseeds/driver/controllers/profile_controller.dart';
+import 'package:bestseeds/employee/screens/help_screen.dart';
 import 'package:bestseeds/routes/app_routes.dart';
 import 'package:bestseeds/widgets/profile_menu_item.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:share_plus/share_plus.dart';
 
 class DriverProfileScreen extends StatelessWidget {
   DriverProfileScreen({super.key});
@@ -34,17 +36,21 @@ class DriverProfileScreen extends StatelessWidget {
                     ProfileMenuItem(
                       icon: Icons.local_shipping_outlined,
                       title: 'My Deliveries',
-                      onTap: () {},
+                      onTap: () => Get.toNamed(AppRoutes.driverMyDeliveries),
                     ),
                     ProfileMenuItem(
                       icon: Icons.help_outline,
                       title: 'Help',
-                      onTap: () {},
+                      onTap: () => Get.to(() => const HelpScreen()),
                     ),
                     ProfileMenuItem(
                       icon: Icons.share_outlined,
                       title: 'Share this app',
-                      onTap: () {},
+                      onTap: () {
+                        Share.share(
+                          'Check out Best Seeds - the best app for seed delivery management!\nhttps://play.google.com/store/apps/details?id=com.bestseeds.app',
+                        );
+                      },
                     ),
                     ProfileMenuItem(
                       icon: Icons.description_outlined,

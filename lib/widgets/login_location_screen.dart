@@ -6,7 +6,7 @@ import 'package:geolocator/geolocator.dart';
 /// Screen shown after login to select/confirm user location
 /// Used by both Driver and Employee login flows
 class LoginLocationScreen extends StatefulWidget {
-  final Function(LocationData location) onLocationSelected;
+  final Future<void> Function(LocationData location) onLocationSelected;
   final String userType; // 'driver' or 'employee'
 
   const LoginLocationScreen({
@@ -21,6 +21,7 @@ class LoginLocationScreen extends StatefulWidget {
 
 class _LoginLocationScreenState extends State<LoginLocationScreen> {
   bool _isLoading = false;
+  bool _isContinuing = false;
   LocationData? _selectedLocation;
 
   @override
@@ -115,9 +116,21 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
     }
   }
 
-  void _confirmLocation() {
-    if (_selectedLocation != null) {
-      widget.onLocationSelected(_selectedLocation!);
+  Future<void> _confirmLocation() async {
+    if (_selectedLocation == null || _isContinuing) return;
+
+    setState(() {
+      _isContinuing = true;
+    });
+
+    try {
+      await widget.onLocationSelected(_selectedLocation!);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isContinuing = false;
+        });
+      }
     }
   }
 
@@ -339,7 +352,7 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
                         width: double.infinity,
                         height: height * 0.06,
                         child: ElevatedButton(
-                          onPressed: _selectedLocation == null || _isLoading
+                          onPressed: _selectedLocation == null || _isLoading || _isContinuing
                               ? null
                               : _confirmLocation,
                           style: ElevatedButton.styleFrom(
@@ -353,16 +366,25 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
                               borderRadius: BorderRadius.circular(14),
                             ),
                           ),
-                          child: Text(
-                            'Continue',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: _selectedLocation != null
-                                  ? Colors.white
-                                  : Colors.white.withValues(alpha: 0.7),
-                            ),
-                          ),
+                          child: _isContinuing
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    color: Colors.white,
+                                    strokeWidth: 2.5,
+                                  ),
+                                )
+                              : Text(
+                                  'Continue',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    color: _selectedLocation != null
+                                        ? Colors.white
+                                        : Colors.white.withValues(alpha: 0.7),
+                                  ),
+                                ),
                         ),
                       ),
                       SizedBox(height: height * 0.02),
