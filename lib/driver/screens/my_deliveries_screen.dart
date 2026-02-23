@@ -153,6 +153,7 @@ class _MyDeliveriesScreenState extends State<MyDeliveriesScreen> {
       onRefresh: _fetchDeliveries,
       color: const Color(0xFF0077C8),
       child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.all(width * 0.04),
         itemCount: _routes.length,
         itemBuilder: (context, index) {

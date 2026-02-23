@@ -107,8 +107,9 @@ class DriverRoute {
   /// Check if start location is valid for map
   bool get hasValidStartLocation => startLat != null && startLng != null;
 
-  /// Get hatchery name or fallback
-  String get hatcheryName => hatchery?.categoryName ?? 'Unknown Hatchery';
+  /// Get hatchery name or fallback (category name for vehicle availability bookings)
+  String get hatcheryName =>
+      hatchery?.categoryName ?? category?.categoryName ?? 'Unknown Hatchery';
 
   /// Get category name or fallback
   String get categoryName => category?.categoryName ?? '';

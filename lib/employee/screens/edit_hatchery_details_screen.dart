@@ -273,6 +273,8 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
         vehicleDescription: _vehicleDescriptionController.text.isNotEmpty
             ? _vehicleDescriptionController.text
             : null,
+        dropLat: _selectedLatitude,
+        dropLng: _selectedLongitude,
       );
 
       AppSnackbar.success('Booking updated successfully');
@@ -336,7 +338,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            widget.booking.status.label,
+                            widget.booking.status.displayLabel,
                             style: TextStyle(
                               fontSize: width * 0.032,
                               color: _getStatusColor(widget.booking.status),
@@ -396,12 +398,12 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                     SizedBox(height: height * 0.025),
 
                     /// Booking Description
-                    _buildTextArea(width, height, 'Booking Description',
+                    _buildTextArea(width, height, 'Booking Status',
                         _bookingDescriptionController),
                     SizedBox(height: height * 0.025),
 
                     /// Vehicle Description
-                    _buildTextArea(width, height, 'Vehicle Description',
+                    _buildTextArea(width, height, 'Vehicle Status',
                         _vehicleDescriptionController),
                     SizedBox(height: height * 0.03),
 
@@ -442,11 +444,11 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
 
   Color _getStatusColor(BookingStatus status) {
     if (status.isPending) return Colors.orange;
-    if (status.isAccepted) return Colors.blue;
-    if (status.isInProgress) return Colors.purple;
-    if (status.isDelivered) return Colors.teal;
+    if (status.isConfirmed) return Colors.blue;
+    if (status.isDriverAssigned) return Colors.purple;
+    if (status.isInProgress) return Colors.teal;
     if (status.isCompleted) return Colors.green;
-    if (status.isRejected) return Colors.red;
+    if (status.isFailed) return Colors.red;
     return Colors.grey;
   }
 
@@ -1401,7 +1403,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                                     token: token,
                                     bookingId: widget.booking.bookingId,
                                     driverId: selectedDriver!.id,
-                                    driverName: selectedDriver!.name,
+                                    driverName: selectedDriver!.name.isNotEmpty ? selectedDriver!.name : null,
                                     driverMobile: selectedDriver!.mobile,
                                     vehicleNumber: vehicleNumberController.text,
                                     vehicleStartDate: vehicleStartDate != null
@@ -1704,7 +1706,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
-                  widget.booking.status.label,
+                  widget.booking.status.displayLabel,
                   style: TextStyle(
                     fontSize: width * 0.028,
                     color: _getStatusColor(widget.booking.status),

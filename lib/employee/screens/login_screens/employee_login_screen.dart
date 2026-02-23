@@ -19,6 +19,7 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
 
   // Track if form is valid (ID not empty and password min 6 chars)
   bool _isFormValid = false;
+  bool _obscurePassword = true;
 
   @override
   void initState() {
@@ -208,9 +209,23 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
                                   child: TextField(
                                     controller: passCtrl,
                                     keyboardType: TextInputType.text,
-                                    decoration: const InputDecoration(
+                                    obscureText: _obscurePassword,
+                                    decoration: InputDecoration(
                                       hintText: 'Enter Password',
                                       border: InputBorder.none,
+                                      suffixIcon: IconButton(
+                                        icon: Icon(
+                                          _obscurePassword
+                                              ? Icons.visibility_off
+                                              : Icons.visibility,
+                                          color: Colors.grey,
+                                        ),
+                                        onPressed: () {
+                                          setState(() {
+                                            _obscurePassword = !_obscurePassword;
+                                          });
+                                        },
+                                      ),
                                     ),
                                   ),
                                 ),

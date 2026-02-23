@@ -1,5 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:bestseeds/driver/services/background_location_service.dart';
+import 'package:bestseeds/driver/services/driver_storage_service.dart';
+import 'package:bestseeds/employee/services/storage_service.dart';
+import 'package:bestseeds/routes/app_routes.dart';
+import 'package:bestseeds/utils/app_snackbar.dart';
+import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
 
 class ApiClient {
@@ -38,6 +45,18 @@ class ApiClient {
     return 'Something went wrong';
   }
 
+  /// Force logout when admin deactivates the vendor/driver account
+  void _handleAccountDeactivated(String message) {
+    print('API CLIENT: Account deactivated — forcing logout');
+    // Clear both employee and driver storage
+    StorageService().logout();
+    DriverStorageService().logout();
+    // Stop background location service if running
+    BackgroundLocationService.stop();
+    AppSnackbar.error(message);
+    Get.offAllNamed(AppRoutes.login);
+  }
+
   Future<Map<String, dynamic>> request({
     required String url,
     required Map<String, dynamic> body,
@@ -57,46 +76,80 @@ class ApiClient {
 
     http.Response response;
 
-    switch (method.toUpperCase()) {
-      case 'GET':
-        response = await http.get(
-          Uri.parse(url),
-          headers: headers,
-        );
-        break;
-      case 'PUT':
-        response = await http.put(
-          Uri.parse(url),
-          headers: headers,
-          body: jsonEncode(body),
-        );
-        break;
-      case 'DELETE':
-        response = await http.delete(
-          Uri.parse(url),
-          headers: headers,
-        );
-        break;
-      case 'POST':
-      default:
-        response = await http.post(
-          Uri.parse(url),
-          headers: headers,
-          body: jsonEncode(body),
-        );
-        break;
+    try {
+      switch (method.toUpperCase()) {
+        case 'GET':
+          response = await http.get(
+            Uri.parse(url),
+            headers: headers,
+          ).timeout(const Duration(seconds: 30));
+          break;
+        case 'PUT':
+          response = await http.put(
+            Uri.parse(url),
+            headers: headers,
+            body: jsonEncode(body),
+          ).timeout(const Duration(seconds: 30));
+          break;
+        case 'DELETE':
+          response = await http.delete(
+            Uri.parse(url),
+            headers: headers,
+          ).timeout(const Duration(seconds: 30));
+          break;
+        case 'POST':
+        default:
+          response = await http.post(
+            Uri.parse(url),
+            headers: headers,
+            body: jsonEncode(body),
+          ).timeout(const Duration(seconds: 30));
+          break;
+      }
+    } on SocketException {
+      throw Exception('No internet connection. Please check your network and try again.');
+    } on TimeoutException {
+      throw Exception('Request timed out. Please try again.');
+    } on http.ClientException {
+      throw Exception('No internet connection. Please check your network and try again.');
+    } on FormatException {
+      throw Exception('Invalid server response. Please try again later.');
     }
 
     print('API CLIENT: Status Code -> ${response.statusCode}');
     print('API CLIENT: Raw Response -> ${response.body}');
 
-    final data = jsonDecode(response.body);
+    // Handle empty response body
+    if (response.body.isEmpty) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return {};
+      }
+      throw Exception('Empty response from server. Please try again.');
+    }
+
+    // Parse JSON safely
+    dynamic data;
+    try {
+      data = jsonDecode(response.body);
+    } on FormatException {
+      throw Exception('Invalid server response. Please try again later.');
+    }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
       print('API CLIENT: Parsed Response -> $data');
       return data;
     } else {
+      // Check if account was deactivated by admin
+      if (response.statusCode == 403 && data['account_inactive'] == true) {
+        _handleAccountDeactivated(data['message'] ?? 'Your account has been deactivated.');
+      }
       print('API CLIENT ERROR: $data');
+
+      // Handle 500+ server errors with friendly message
+      if (response.statusCode >= 500) {
+        throw Exception('Server error. Please try again later.');
+      }
+
       final errorMessage = _extractErrorFromResponse(data);
       print('API CLIENT: Extracted Error Message -> $errorMessage');
       throw Exception(errorMessage);
@@ -129,19 +182,55 @@ class ApiClient {
       );
     }
 
-    final streamedResponse = await request.send();
-    final response = await http.Response.fromStream(streamedResponse);
+    http.Response response;
+
+    try {
+      final streamedResponse = await request.send().timeout(const Duration(seconds: 60));
+      response = await http.Response.fromStream(streamedResponse);
+    } on SocketException {
+      throw Exception('No internet connection. Please check your network and try again.');
+    } on TimeoutException {
+      throw Exception('Request timed out. Please try again.');
+    } on http.ClientException {
+      throw Exception('No internet connection. Please check your network and try again.');
+    } on FormatException {
+      throw Exception('Invalid server response. Please try again later.');
+    }
 
     print('API CLIENT MULTIPART: Status Code -> ${response.statusCode}');
     print('API CLIENT MULTIPART: Raw Response -> ${response.body}');
 
-    final data = jsonDecode(response.body);
+    // Handle empty response body
+    if (response.body.isEmpty) {
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return {};
+      }
+      throw Exception('Empty response from server. Please try again.');
+    }
+
+    // Parse JSON safely
+    dynamic data;
+    try {
+      data = jsonDecode(response.body);
+    } on FormatException {
+      throw Exception('Invalid server response. Please try again later.');
+    }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
       print('API CLIENT MULTIPART: Parsed Response -> $data');
       return data;
     } else {
+      // Check if account was deactivated by admin
+      if (response.statusCode == 403 && data['account_inactive'] == true) {
+        _handleAccountDeactivated(data['message'] ?? 'Your account has been deactivated.');
+      }
       print('API CLIENT MULTIPART ERROR: $data');
+
+      // Handle 500+ server errors with friendly message
+      if (response.statusCode >= 500) {
+        throw Exception('Server error. Please try again later.');
+      }
+
       final errorMessage = _extractErrorFromResponse(data);
       print('API CLIENT MULTIPART: Extracted Error Message -> $errorMessage');
       throw Exception(errorMessage);

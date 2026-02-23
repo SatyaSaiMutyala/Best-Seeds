@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:bestseeds/driver/models/driver_model.dart';
+import 'package:bestseeds/driver/services/booking_cache_service.dart';
 import 'package:bestseeds/main.dart';
 
 class DriverStorageService {
@@ -43,6 +44,7 @@ class DriverStorageService {
     await prefs.remove(_locationLatKey);
     await prefs.remove(_locationLngKey);
     await prefs.remove(_locationAddressKey);
+    await DriverBookingCacheService().clearAll();
   }
 
   Future<void> saveLocation({

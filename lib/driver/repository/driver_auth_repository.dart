@@ -3,9 +3,11 @@ import 'dart:io';
 import 'package:bestseeds/driver/models/driver_booking_model.dart';
 import 'package:bestseeds/driver/models/driver_model.dart';
 import 'package:bestseeds/driver/service/auth_service.dart';
+import 'package:bestseeds/driver/services/booking_cache_service.dart';
 
 class DriverAuthRepository {
   final AuthService _service = AuthService();
+  final DriverBookingCacheService _cache = DriverBookingCacheService();
 
   Future<Map<String, dynamic>> sendOtp(String mobile) async {
     print('Repository: sendOtp called');
@@ -61,14 +63,30 @@ class DriverAuthRepository {
 
   Future<DriverBookingResponse> getBookings(String token) async {
     final res = await _service.getDriverBookings(token: token);
+    // Cache the response for offline access
+    _cache.cacheBookings(res);
     return DriverBookingResponse.fromJson(res);
+  }
+
+  /// Load bookings from local SQLite cache
+  Future<DriverBookingResponse?> getCachedBookings() async {
+    return _cache.getCachedBookings();
   }
 
   Future<void> startJourney({
     required String token,
     required List<int> bookingIds,
+    double? startLat,
+    double? startLng,
+    String? startAddress,
   }) async {
-    await _service.startJourney(token: token, bookingIds: bookingIds);
+    await _service.startJourney(
+      token: token,
+      bookingIds: bookingIds,
+      startLat: startLat,
+      startLng: startLng,
+      startAddress: startAddress,
+    );
   }
 
   Future<Map<String, dynamic>> updateDropStatus({

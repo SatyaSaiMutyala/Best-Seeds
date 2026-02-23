@@ -154,7 +154,7 @@ class LocationSelector {
       if (context.mounted) {
         Navigator.pop(context); // Close loading dialog
       }
-      AppSnackbar.error('Failed to get location: ${e.toString()}');
+      AppSnackbar.error('Failed to get location. Please check your GPS and internet connection.');
       return null;
     }
   }
@@ -676,7 +676,7 @@ class _LocationPickerScreenState extends State<LocationPickerScreen> {
         AppSnackbar.error('Failed to get location details');
       }
     } catch (e) {
-      AppSnackbar.error('Error: ${e.toString()}');
+      AppSnackbar.error('Failed to get location details. Please try again.');
     }
   }
 

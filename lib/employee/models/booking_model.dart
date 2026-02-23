@@ -88,7 +88,9 @@ class Booking {
   }
 
   bool get isEditable =>
-      status.value == 1 || status.value == 2 || status.value == 3;
+      status.value == 1 || status.value == 2 || status.value == 3 || status.value == 4;
+
+  bool get isVehicleAvailability => bookingType == 'vehicle_availability';
 
   String get displayBookingType {
     switch (bookingType) {
@@ -96,6 +98,8 @@ class Booking {
         return 'Spot Hatchery';
       case 'hatchery':
         return 'Hatchery';
+      case 'vehicle_availability':
+        return 'Vehicle Availability';
       default:
         return bookingType;
     }
@@ -178,11 +182,33 @@ class BookingStatus {
   }
 
   bool get isPending => value == 1;
+  bool get isConfirmed => value == 2;
   bool get isAccepted => value == 2;
-  bool get isInProgress => value == 3;
+  bool get isDriverAssigned => value == 3;
+  bool get isInProgress => value == 4;
   bool get isDelivered => value == 4;
   bool get isCompleted => value == 5;
+  bool get isFailed => value == 6;
   bool get isRejected => value == 6;
+
+  String get displayLabel {
+    switch (value) {
+      case 1:
+        return 'Pending';
+      case 2:
+        return 'Confirmed';
+      case 3:
+        return 'Driver Assigned';
+      case 4:
+        return 'In Progress';
+      case 5:
+        return 'Completed';
+      case 6:
+        return 'Failed';
+      default:
+        return label;
+    }
+  }
 }
 
 class BookingPickup {

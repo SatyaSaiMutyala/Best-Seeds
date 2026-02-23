@@ -214,7 +214,7 @@ class _DropLocationsBottomSheetState extends State<DropLocationsBottomSheet> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      'ID:${widget.route.hatcheryId ?? 'N/A'}',
+                      'ID: ${widget.route.bookingIdsString}',
                       style: TextStyle(
                         fontSize: widget.width * 0.038,
                         fontWeight: FontWeight.w600,

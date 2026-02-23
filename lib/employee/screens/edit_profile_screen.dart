@@ -37,8 +37,13 @@ class _EmployeeEditProfileScreenState extends State<EmployeeEditProfileScreen> {
     _loadUserData();
   }
 
-  void _loadUserData() {
-    final user = profileController.user.value;
+  Future<void> _loadUserData() async {
+    // Try the profile controller first
+    var user = profileController.user.value;
+
+    // If null, load directly from storage (handles timing race)
+    user ??= await _storage.getUser();
+
     if (user != null) {
       nameController.text = user.name;
 
@@ -50,6 +55,11 @@ class _EmployeeEditProfileScreenState extends State<EmployeeEditProfileScreen> {
 
       addressController.text = user.address ?? '';
       pincodeController.text = user.pincode ?? '';
+
+      // Keep the controller in sync
+      if (profileController.user.value == null) {
+        profileController.user.value = user;
+      }
     }
   }
 

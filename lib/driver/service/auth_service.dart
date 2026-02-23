@@ -148,6 +148,19 @@ class AuthService {
     };
   }
 
+  /// Fetch fresh tracking data for a single booking
+  Future<Map<String, dynamic>> getBookingTracking({
+    required String token,
+    required int bookingId,
+  }) {
+    return _apiClient.request(
+      url: '${AppConstants.baseUrl}${AppConstants.employeeBookingTrackingApi}/$bookingId/tracking',
+      body: {},
+      method: 'GET',
+      token: token,
+    );
+  }
+
   Future<Map<String, dynamic>> acceptBooking({
     required String token,
     required int bookingId,
@@ -189,6 +202,8 @@ class AuthService {
     String? driverName,
     String? driverMobile,
     String? vehicleNumber,
+    double? dropLat,
+    double? dropLng,
   }) {
     return _apiClient.request(
       url:
@@ -208,6 +223,8 @@ class AuthService {
         if (driverName != null) 'driver_name': driverName,
         if (driverMobile != null) 'driver_mobile': driverMobile,
         if (vehicleNumber != null) 'vehicle_number': vehicleNumber,
+        if (dropLat != null) 'drop_lat': dropLat,
+        if (dropLng != null) 'drop_lng': dropLng,
       },
       token: token,
     );
@@ -226,7 +243,7 @@ class AuthService {
     required String token,
     required int bookingId,
     int? driverId,
-    required String driverName,
+    String? driverName,
     required String driverMobile,
     required String vehicleNumber,
     String? vehicleStartDate,
@@ -241,7 +258,7 @@ class AuthService {
           '${AppConstants.baseUrl}${AppConstants.employeeChangeDriverApi}/$bookingId/change-driver',
       body: {
         if (driverId != null) 'driver_id': driverId,
-        'driver_name': driverName,
+        if (driverName != null && driverName.isNotEmpty) 'driver_name': driverName,
         'driver_mobile': driverMobile,
         'vehicle_number': vehicleNumber,
         if (vehicleStartDate != null) 'vehicle_start_date': vehicleStartDate,
@@ -367,6 +384,9 @@ class AuthService {
   Future<void> startJourney({
   required String token,
   required List<int> bookingIds,
+  double? startLat,
+  double? startLng,
+  String? startAddress,
 }) async {
   await _apiClient.request(
     url: AppConstants.baseUrl + AppConstants.driverStartJourneyApi,
@@ -374,6 +394,9 @@ class AuthService {
     token: token,
     body: {
       'booking_ids': bookingIds,
+      if (startLat != null) 'start_lat': startLat,
+      if (startLng != null) 'start_lng': startLng,
+      if (startAddress != null) 'start_address': startAddress,
     },
   );
 }

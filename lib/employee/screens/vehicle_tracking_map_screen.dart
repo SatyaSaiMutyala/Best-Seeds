@@ -1,6 +1,10 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:bestseeds/employee/models/booking_model.dart';
+import 'package:bestseeds/employee/repository/auth_repository.dart';
+import 'package:bestseeds/employee/services/storage_service.dart';
+import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:bestseeds/utils/custom_marker_helper.dart';
 import 'package:bestseeds/utils/google_maps_service.dart';
 import 'package:flutter/foundation.dart';
@@ -23,6 +27,13 @@ class VehicleTrackingMapScreen extends StatefulWidget {
 }
 
 class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
+  // Mutable booking reference (updated on refresh)
+  late Booking _booking;
+
+  // Repository and storage for refresh
+  final AuthRepository _repo = AuthRepository();
+  final StorageService _storage = StorageService();
+
   // Separate controllers for small and expanded maps
   GoogleMapController? _smallMapController;
   GoogleMapController? _expandedMapController;
@@ -61,14 +72,32 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
   LatLng? _currentLatLng;
   LatLng? _destinationLatLng;
 
+  // Estimated delivery time from vehicle to destination
+  String _estimatedDuration = '';
+
+  // Intermediate route stops
+  List<Map<String, dynamic>> _routeStops = [];
+  DateTime? _routeStartTime;
+  int _totalRouteDurationSeconds = 0;
+
+  // Refresh state
+  DateTime _lastRefreshedAt = DateTime.now();
+  bool _isRefreshing = false;
+  Timer? _timeAgoTimer;
+
   @override
   void initState() {
     super.initState();
+    _booking = widget.booking;
     _initializeMap();
+    // Update "Updated X mins ago" text every 30 seconds
+    _timeAgoTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   Future<void> _initializeMap() async {
-    final currentLoc = widget.booking.currentLocation;
+    final currentLoc = _booking.currentLocation;
 
     // Get current vehicle position from API
     if (currentLoc != null &&
@@ -89,7 +118,66 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
     await _loadCustomMarkers();
 
     // Then setup markers and routes
-    await _setupMarkersAndPolylines();
+    try {
+      await _setupMarkersAndPolylines();
+    } catch (e) {
+      debugPrint('Error setting up map markers/routes: $e');
+      if (mounted) {
+        setState(() => _isLoadingRoute = false);
+        AppSnackbar.error('Failed to load route. Please try refreshing.');
+      }
+    }
+
+    setState(() {
+      _lastRefreshedAt = DateTime.now();
+    });
+  }
+
+  Future<void> _refreshData() async {
+    if (_isRefreshing) return;
+    setState(() => _isRefreshing = true);
+
+    try {
+      final token = _storage.getToken();
+      if (token != null) {
+        final freshBooking = await _repo.getBookingTracking(
+          token: token,
+          bookingId: _booking.bookingId,
+        );
+
+        _booking = freshBooking;
+
+        final currentLoc = _booking.currentLocation;
+        if (currentLoc != null &&
+            currentLoc.lat != null &&
+            currentLoc.lng != null) {
+          _currentVehiclePosition = LatLng(currentLoc.lat!, currentLoc.lng!);
+        }
+
+        // Reset route data
+        _routeStops = [];
+        _routeStartTime = null;
+        _totalRouteDurationSeconds = 0;
+        _estimatedDuration = '';
+
+        await _setupMarkersAndPolylines();
+
+        // Re-fit maps
+        _fitSmallMapToAllMarkers();
+        _fitExpandedMapToAllMarkers();
+      }
+
+      setState(() {
+        _lastRefreshedAt = DateTime.now();
+      });
+    } catch (e) {
+      debugPrint('Error refreshing tracking data: $e');
+      if (mounted) {
+        AppSnackbar.error(extractErrorMessage(e));
+      }
+    } finally {
+      setState(() => _isRefreshing = false);
+    }
   }
 
   Future<void> _loadCustomMarkers() async {
@@ -111,9 +199,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
   }
 
   Future<void> _setupMarkersAndPolylines() async {
-    final pickup = widget.booking.pickup;
-    final currentLoc = widget.booking.currentLocation;
-    final destination = widget.booking.destination;
+    final pickup = _booking.pickup;
+    final currentLoc = _booking.currentLocation;
+    final destination = _booking.destination;
 
     Set<Polyline> polylines = {};
 
@@ -141,106 +229,119 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
     // Build markers for both small and expanded views
     _buildMarkers();
 
-    /// -------- Routes using Directions API --------
-
-    // Route from Pickup to Current Location (completed path - green)
-    if (_pickupLatLng != null && _currentLatLng != null) {
-      final routePoints = await GoogleMapsService.getDirections(
-        origin: _pickupLatLng!,
-        destination: _currentLatLng!,
-      );
-
-      if (routePoints.isNotEmpty) {
-        polylines.add(
-          Polyline(
-            polylineId: const PolylineId('pickup_to_current'),
-            points: routePoints,
-            color: Colors.green,
-            width: 5,
-            patterns: [], // Solid line for completed path
-          ),
-        );
-      } else {
-        // Fallback to straight line if directions API fails
-        polylines.add(
-          Polyline(
-            polylineId: const PolylineId('pickup_to_current'),
-            points: [_pickupLatLng!, _currentLatLng!],
-            color: Colors.green,
-            width: 4,
-          ),
-        );
-      }
-    }
-
-    // Route from Current Location to Destination (remaining path - blue dashed)
-    if (_currentLatLng != null && _destinationLatLng != null) {
-      final routePoints = await GoogleMapsService.getDirections(
-        origin: _currentLatLng!,
-        destination: _destinationLatLng!,
-      );
-
-      if (routePoints.isNotEmpty) {
-        polylines.add(
-          Polyline(
-            polylineId: const PolylineId('current_to_destination'),
-            points: routePoints,
-            color: const Color(0xFF0077C8),
-            width: 5,
-            patterns: [
-              PatternItem.dash(20),
-              PatternItem.gap(10),
-            ], // Dashed line for remaining path
-          ),
-        );
-      } else {
-        // Fallback to straight line if directions API fails
-        polylines.add(
-          Polyline(
-            polylineId: const PolylineId('current_to_destination'),
-            points: [_currentLatLng!, _destinationLatLng!],
-            color: const Color(0xFF0077C8),
-            width: 4,
-            patterns: [
-              PatternItem.dash(20),
-              PatternItem.gap(10),
-            ],
-          ),
-        );
-      }
-    }
-
-    // If no current location, show full route from pickup to destination
-    if (_currentLatLng == null &&
-        _pickupLatLng != null &&
-        _destinationLatLng != null) {
-      final routePoints = await GoogleMapsService.getDirections(
+    /// -------- Route + Intermediate Stops using single Directions API call --------
+    if (_pickupLatLng != null && _destinationLatLng != null) {
+      final routeData = await GoogleMapsService.getRouteWithStops(
         origin: _pickupLatLng!,
         destination: _destinationLatLng!,
+        driverPosition: _currentLatLng,
       );
 
-      if (routePoints.isNotEmpty) {
-        polylines.add(
-          Polyline(
-            polylineId: const PolylineId('full_route'),
-            points: routePoints,
-            color: const Color(0xFF0077C8),
-            width: 5,
-            patterns: [
-              PatternItem.dash(20),
-              PatternItem.gap(10),
-            ],
-          ),
-        );
+      if (routeData.isNotEmpty) {
+        final polylinePoints =
+            routeData['polyline_points'] as List<LatLng>? ?? [];
+        _routeStops =
+            routeData['stops'] as List<Map<String, dynamic>>? ?? [];
+        _totalRouteDurationSeconds =
+            routeData['total_duration_seconds'] as int? ?? 0;
+
+        final driverSplitIndex =
+            routeData['driver_split_index'] as int? ?? 0;
+        final driverFraction =
+            routeData['driver_progress_fraction'] as double? ?? 0.0;
+        final remainingSeconds =
+            routeData['remaining_duration_seconds'] as int? ?? 0;
+
+        _estimatedDuration = _formatDuration(remainingSeconds);
+
+        // Calculate estimated route start time from driver's last update
+        if (_currentLatLng != null &&
+            currentLoc?.updatedAt != null &&
+            currentLoc!.updatedAt!.isNotEmpty) {
+          try {
+            final updatedAt = DateTime.parse(currentLoc.updatedAt!);
+            final elapsedSeconds =
+                (driverFraction * _totalRouteDurationSeconds).round();
+            _routeStartTime =
+                updatedAt.subtract(Duration(seconds: elapsedSeconds));
+          } catch (_) {}
+        }
+
+        if (polylinePoints.isNotEmpty) {
+          if (_currentLatLng != null &&
+              driverSplitIndex > 0 &&
+              driverSplitIndex < polylinePoints.length) {
+            // Green solid line: pickup to driver position (completed)
+            polylines.add(
+              Polyline(
+                polylineId: const PolylineId('completed'),
+                points: polylinePoints.sublist(0, driverSplitIndex + 1),
+                color: Colors.green,
+                width: 5,
+              ),
+            );
+            // Blue dashed line: driver position to destination (remaining)
+            polylines.add(
+              Polyline(
+                polylineId: const PolylineId('remaining'),
+                points: polylinePoints.sublist(driverSplitIndex),
+                color: const Color(0xFF0077C8),
+                width: 5,
+                patterns: [
+                  PatternItem.dash(20),
+                  PatternItem.gap(10),
+                ],
+              ),
+            );
+          } else {
+            // No current location — full route as dashed blue
+            polylines.add(
+              Polyline(
+                polylineId: const PolylineId('full_route'),
+                points: polylinePoints,
+                color: const Color(0xFF0077C8),
+                width: 5,
+                patterns: [
+                  PatternItem.dash(20),
+                  PatternItem.gap(10),
+                ],
+              ),
+            );
+          }
+        }
       } else {
-        polylines.add(
-          Polyline(
-            polylineId: const PolylineId('full_route'),
-            points: [_pickupLatLng!, _destinationLatLng!],
-            color: const Color(0xFF0077C8),
-            width: 4,
-          ),
-        );
+        // Fallback: straight lines if Directions API fails
+        if (_currentLatLng != null) {
+          polylines.add(
+            Polyline(
+              polylineId: const PolylineId('completed'),
+              points: [_pickupLatLng!, _currentLatLng!],
+              color: Colors.green,
+              width: 4,
+            ),
+          );
+          polylines.add(
+            Polyline(
+              polylineId: const PolylineId('remaining'),
+              points: [_currentLatLng!, _destinationLatLng!],
+              color: const Color(0xFF0077C8),
+              width: 4,
+              patterns: [
+                PatternItem.dash(20),
+                PatternItem.gap(10),
+              ],
+            ),
+          );
+        } else {
+          polylines.add(
+            Polyline(
+              polylineId: const PolylineId('full_route'),
+              points: [_pickupLatLng!, _destinationLatLng!],
+              color: const Color(0xFF0077C8),
+              width: 4,
+            ),
+          );
+        }
       }
     }
 
@@ -255,9 +356,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
 
   /// Build markers for both small and expanded map views
   void _buildMarkers() {
-    final pickup = widget.booking.pickup;
-    final currentLoc = widget.booking.currentLocation;
-    final destination = widget.booking.destination;
+    final pickup = _booking.pickup;
+    final currentLoc = _booking.currentLocation;
+    final destination = _booking.destination;
 
     Set<Marker> smallMarkers = {};
     Set<Marker> expandedMarkers = {};
@@ -441,29 +542,120 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
     );
   }
 
-  /// Default view with small map + details + timeline
+  /// Default view with small map + details + timeline + refresh bar
   Widget _buildDefaultView(double width, double height) {
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          /// Map Section (clickable to expand)
-          _buildSmallMapSection(width, height),
-
-          /// Content Section
-          Padding(
-            padding: EdgeInsets.all(width * 0.05),
+    return Column(
+      children: [
+        Expanded(
+          child: SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildDriverDetails(width, height),
-                SizedBox(height: height * 0.025),
-                _buildVehicleStatus(width, height),
-                SizedBox(height: height * 0.01),
-                _buildDeliveryInfo(width, height),
-                SizedBox(height: height * 0.025),
-                _buildLocationTimeline(width, height),
+                /// Map Section (clickable to expand)
+                _buildSmallMapSection(width, height),
+
+                /// Content Section
+                Padding(
+                  padding: EdgeInsets.all(width * 0.05),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildDriverDetails(width, height),
+                      SizedBox(height: height * 0.025),
+                      _buildVehicleStatus(width, height),
+                      SizedBox(height: height * 0.01),
+                      _buildDeliveryInfo(width, height),
+                      SizedBox(height: height * 0.025),
+                      _buildLocationTimeline(width, height),
+                    ],
+                  ),
+                ),
               ],
+            ),
+          ),
+        ),
+
+        /// Bottom refresh bar
+        _buildRefreshBar(width, height),
+      ],
+    );
+  }
+
+  String _timeAgoText() {
+    final diff = DateTime.now().difference(_lastRefreshedAt);
+    if (diff.inSeconds < 60) return 'Updated just now';
+    if (diff.inMinutes < 60) {
+      return 'Updated ${diff.inMinutes} min${diff.inMinutes > 1 ? 's' : ''} ago';
+    }
+    return 'Updated ${diff.inHours} hour${diff.inHours > 1 ? 's' : ''} ago';
+  }
+
+  Widget _buildRefreshBar(double width, double height) {
+    final currentLoc = _booking.currentLocation;
+    final locationName = currentLoc?.locationName ?? 'Location not available';
+
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: width * 0.05,
+        vertical: height * 0.015,
+      ),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F5F5),
+        border: Border(
+          top: BorderSide(color: Colors.grey.shade300, width: 1),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  "Arrived $locationName",
+                  style: TextStyle(
+                    fontSize: width * 0.037,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.green.shade700,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _timeAgoText(),
+                  style: TextStyle(
+                    fontSize: width * 0.03,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(width: width * 0.03),
+          GestureDetector(
+            onTap: _isRefreshing ? null : _refreshData,
+            child: Container(
+              width: width * 0.12,
+              height: width * 0.12,
+              decoration: const BoxDecoration(
+                color: Color(0xFF0077C8),
+                shape: BoxShape.circle,
+              ),
+              child: _isRefreshing
+                  ? Padding(
+                      padding: EdgeInsets.all(width * 0.03),
+                      child: const CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Icon(
+                      Icons.refresh,
+                      color: Colors.white,
+                      size: width * 0.06,
+                    ),
             ),
           ),
         ],
@@ -696,86 +888,69 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
   }
 
   Widget _buildSmallMapSection(double width, double height) {
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _isMapExpanded = true;
-        });
-      },
-      child: Container(
-        height: height * 0.22,
-        margin: EdgeInsets.all(width * 0.04),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.1),
-              blurRadius: 10,
-              offset: const Offset(0, 2),
+    return Container(
+      height: height * 0.22,
+      margin: EdgeInsets.all(width * 0.04),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.1),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Stack(
+          children: [
+            GoogleMap(
+              mapType: MapType.normal,
+              initialCameraPosition: _initialPosition,
+              markers: _smallMapMarkers,
+              polylines: _polylines,
+              myLocationEnabled: false,
+              myLocationButtonEnabled: false,
+              zoomControlsEnabled: true,
+              mapToolbarEnabled: true,
+              scrollGesturesEnabled: true,
+              zoomGesturesEnabled: true,
+              rotateGesturesEnabled: true,
+              tiltGesturesEnabled: true,
+              gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+                Factory<OneSequenceGestureRecognizer>(
+                  () => EagerGestureRecognizer(),
+                ),
+              },
+              onMapCreated: (GoogleMapController controller) {
+                _smallMapController = controller;
+                // Fit to show all markers after map is created
+                Future.delayed(const Duration(milliseconds: 300), () {
+                  _fitSmallMapToAllMarkers();
+                });
+              },
             ),
-          ],
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Stack(
-            children: [
-              GoogleMap(
-                mapType: MapType.normal,
-                initialCameraPosition: _initialPosition,
-                markers: _smallMapMarkers,
-                polylines: _polylines,
-                myLocationEnabled: false,
-                myLocationButtonEnabled: false,
-                zoomControlsEnabled: true,
-                mapToolbarEnabled: true,
-                scrollGesturesEnabled: true,
-                zoomGesturesEnabled: true,
-                rotateGesturesEnabled: true,
-                tiltGesturesEnabled: true,
-                gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
-                  Factory<OneSequenceGestureRecognizer>(
-                    () => EagerGestureRecognizer(),
+            // Loading overlay
+            if (_isLoadingRoute)
+              Container(
+                color: Colors.white.withValues(alpha: 0.7),
+                child: const Center(
+                  child: CircularProgressIndicator(
+                    color: Color(0xFF0077C8),
                   ),
-                },
-                onMapCreated: (GoogleMapController controller) {
-                  _smallMapController = controller;
-                  // Fit to show all markers after map is created
-                  Future.delayed(const Duration(milliseconds: 300), () {
-                    _fitSmallMapToAllMarkers();
+                ),
+              ),
+            // Expand icon
+            Positioned(
+              top: width * 0.03,
+              right: width * 0.03,
+              child: GestureDetector(
+                onTap: () {
+                  setState(() {
+                    _isMapExpanded = true;
                   });
                 },
-              ),
-              // Loading overlay
-              if (_isLoadingRoute)
-                Container(
-                  color: Colors.white.withValues(alpha: 0.7),
-                  child: const Center(
-                    child: CircularProgressIndicator(
-                      color: Color(0xFF0077C8),
-                    ),
-                  ),
-                ),
-              // Layers icon
-              Positioned(
-                top: width * 0.03,
-                left: width * 0.03,
-                child: Container(
-                  padding: EdgeInsets.all(width * 0.02),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.layers,
-                    size: width * 0.045,
-                    color: Colors.black,
-                  ),
-                ),
-              ),
-              // Expand icon
-              Positioned(
-                top: width * 0.03,
-                right: width * 0.03,
                 child: Container(
                   padding: EdgeInsets.all(width * 0.02),
                   decoration: const BoxDecoration(
@@ -789,15 +964,15 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
                   ),
                 ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
 
   Widget _buildDriverDetails(double width, double height) {
-    final driver = widget.booking.driverDetails;
+    final driver = _booking.driverDetails;
     final driverName = driver.name.isNotEmpty ? driver.name : 'Not assigned';
     final driverMobile =
         driver.mobile.isNotEmpty ? '+91${driver.mobile}' : 'N/A';
@@ -869,14 +1044,14 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
   }
 
   Widget _buildVehicleStatus(double width, double height) {
-    final status = widget.booking.status;
+    final status = _booking.status;
     String statusMessage;
 
     if (status.isCompleted) {
       statusMessage = 'Your delivery has been completed successfully.';
-    } else if (status.isDelivered) {
-      statusMessage = 'Your order is out for delivery.';
     } else if (status.isInProgress) {
+      statusMessage = 'Your order is out for delivery.';
+    } else if (status.isDriverAssigned) {
       statusMessage = 'Vehicle is on the way to the destination.';
     } else if (status.isAccepted) {
       statusMessage =
@@ -889,12 +1064,55 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Vehicle Status',
-          style: TextStyle(
-            fontSize: width * 0.042,
-            fontWeight: FontWeight.bold,
-          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Vehicle Status',
+              style: TextStyle(
+                fontSize: width * 0.042,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            if (_estimatedDuration.isNotEmpty)
+              Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: width * 0.03,
+                  vertical: width * 0.015,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0077C8).withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Deliver in',
+                      style: TextStyle(
+                        fontSize: width * 0.03,
+                        color: const Color(0xFF0077C8),
+                      ),
+                    ),
+                    SizedBox(width: width * 0.015),
+                    Icon(
+                      Icons.access_time,
+                      size: width * 0.035,
+                      color: const Color(0xFF0077C8),
+                    ),
+                    SizedBox(width: width * 0.01),
+                    Text(
+                      _estimatedDuration,
+                      style: TextStyle(
+                        fontSize: width * 0.032,
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFF0077C8),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
         ),
         SizedBox(height: height * 0.01),
         Text(
@@ -912,22 +1130,22 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
   Widget _buildDeliveryInfo(double width, double height) {
     String deliveryText = '';
 
-    if (widget.booking.deliveryDatetime != null) {
+    if (_booking.deliveryDatetime != null) {
       try {
-        final deliveryDate = DateTime.parse(widget.booking.deliveryDatetime!);
+        final deliveryDate = DateTime.parse(_booking.deliveryDatetime!);
         deliveryText =
             'Delivery Expected on ${DateFormat('dd/MM/yyyy').format(deliveryDate)}';
       } catch (e) {
         deliveryText =
-            'Delivery Expected on ${widget.booking.deliveryDatetime}';
+            'Delivery Expected on ${_booking.deliveryDatetime}';
       }
-    } else if (widget.booking.preferredDate != null) {
+    } else if (_booking.preferredDate != null) {
       try {
-        final preferredDate = DateTime.parse(widget.booking.preferredDate!);
+        final preferredDate = DateTime.parse(_booking.preferredDate!);
         deliveryText =
             'Delivery Expected on ${DateFormat('dd/MM/yyyy').format(preferredDate)}';
       } catch (e) {
-        deliveryText = 'Delivery Expected on ${widget.booking.preferredDate}';
+        deliveryText = 'Delivery Expected on ${_booking.preferredDate}';
       }
     }
 
@@ -945,62 +1163,166 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
   }
 
   Widget _buildLocationTimeline(double width, double height) {
-    final pickup = widget.booking.pickup;
-    final currentLoc = widget.booking.currentLocation;
-    final destination = widget.booking.destination;
+    final pickup = _booking.pickup;
+    final currentLoc = _booking.currentLocation;
+    final destination = _booking.destination;
 
-    // Determine if journey has started
-    final hasStarted = pickup?.vehicleStartedDate != null;
     final hasCurrentLocation =
         currentLoc?.lat != null && currentLoc?.lng != null;
 
-    // Build timeline items dynamically
+    // Split intermediate stops into passed and upcoming
+    final passedStops =
+        _routeStops.where((s) => s['passed'] == true).toList();
+    final upcomingStops =
+        _routeStops.where((s) => s['passed'] != true).toList();
+
     List<Widget> timelineItems = [];
 
-    // Pickup location
+    // 1. Pickup location
+    String pickupTime = '-';
+    if (_routeStartTime != null) {
+      pickupTime = _formatDateTimeObj(_routeStartTime!);
+    } else {
+      pickupTime = _formatDateTime(pickup?.vehicleStartedDate);
+    }
     timelineItems.add(
       _buildTimelineItem(
         width,
         height,
         Icons.location_on,
-        hasStarted ? Colors.green : Colors.grey,
+        hasCurrentLocation ? Colors.green : Colors.grey,
         'Pickup started from',
-        pickup?.locationName ?? widget.booking.hatcheryName,
-        _formatDateTime(pickup?.vehicleStartedDate),
+        pickup?.locationName ?? _booking.hatcheryName,
+        pickupTime,
         isFirst: true,
-        isLast: !hasCurrentLocation && destination == null,
       ),
     );
 
-    // Current location (if vehicle is in transit)
+    // 2. Passed intermediate stops
+    for (final stop in passedStops) {
+      String stopTime = '-';
+      if (_routeStartTime != null) {
+        final estimatedSeconds = stop['estimated_seconds'] as int? ?? 0;
+        final stopDateTime =
+            _routeStartTime!.add(Duration(seconds: estimatedSeconds));
+        stopTime = _formatDateTimeObj(stopDateTime);
+      }
+      timelineItems.add(
+        _buildTimelineItem(
+          width,
+          height,
+          Icons.circle,
+          Colors.green,
+          stop['name'] as String? ?? 'Unknown',
+          null,
+          stopTime,
+        ),
+      );
+    }
+
+    // 3. Current location (if vehicle is in transit)
     if (hasCurrentLocation) {
       timelineItems.add(
         _buildTimelineItem(
           width,
           height,
-          Icons.local_shipping, // Truck icon for timeline too
+          Icons.local_shipping,
           Colors.green,
           currentLoc?.locationName ?? 'Current Location',
           _formatDate(currentLoc?.updatedAt),
           _formatDateTime(currentLoc?.updatedAt),
-          isLast: destination == null,
         ),
       );
     }
 
-    // Destination
+    // 4. Upcoming intermediate stops
+    for (final stop in upcomingStops) {
+      String stopTime = '-';
+      if (_routeStartTime != null) {
+        final estimatedSeconds = stop['estimated_seconds'] as int? ?? 0;
+        final stopDateTime =
+            _routeStartTime!.add(Duration(seconds: estimatedSeconds));
+        stopTime = _formatDateTimeObj(stopDateTime);
+      }
+      timelineItems.add(
+        _buildTimelineItem(
+          width,
+          height,
+          Icons.circle,
+          Colors.grey,
+          stop['name'] as String? ?? 'Unknown',
+          null,
+          stopTime,
+        ),
+      );
+    }
+
+    // 5. Destination
+    String destinationTime = '-';
+    if (_routeStartTime != null && _totalRouteDurationSeconds > 0) {
+      final arrivalTime =
+          _routeStartTime!.add(Duration(seconds: _totalRouteDurationSeconds));
+      destinationTime = _formatDateTimeObj(arrivalTime);
+    }
     timelineItems.add(
       _buildTimelineItem(
         width,
         height,
         Icons.flag,
-        widget.booking.status.isCompleted ? Colors.green : Colors.grey,
+        _booking.status.isCompleted ? Colors.green : Colors.grey,
         'Destination',
-        destination?.locationName ?? widget.booking.droppingLocation,
-        widget.booking.status.isCompleted ? 'Delivered' : '-',
+        destination?.locationName ?? _booking.droppingLocation,
+        _booking.status.isCompleted ? 'Delivered' : destinationTime,
         isLast: true,
       ),
     );
+
+    // 6. ETA row below destination
+    // if (_estimatedDuration.isNotEmpty && !_booking.status.isCompleted) {
+    //   timelineItems.add(
+    //     Padding(
+    //       padding: EdgeInsets.only(
+    //           left: width * 0.08 + width * 0.04, top: height * 0.01),
+    //       child: Container(
+    //         padding: EdgeInsets.symmetric(
+    //           horizontal: width * 0.03,
+    //           vertical: width * 0.015,
+    //         ),
+    //         decoration: BoxDecoration(
+    //           color: const Color(0xFF0077C8).withValues(alpha: 0.1),
+    //           borderRadius: BorderRadius.circular(8),
+    //         ),
+    //         child: Row(
+    //           mainAxisSize: MainAxisSize.min,
+    //           children: [
+    //             Text(
+    //               'Deliver in',
+    //               style: TextStyle(
+    //                 fontSize: width * 0.03,
+    //                 color: const Color(0xFF0077C8),
+    //               ),
+    //             ),
+    //             SizedBox(width: width * 0.015),
+    //             Icon(
+    //               Icons.access_time,
+    //               size: width * 0.035,
+    //               color: const Color(0xFF0077C8),
+    //             ),
+    //             SizedBox(width: width * 0.01),
+    //             Text(
+    //               _estimatedDuration,
+    //               style: TextStyle(
+    //                 fontSize: width * 0.032,
+    //                 fontWeight: FontWeight.w600,
+    //                 color: const Color(0xFF0077C8),
+    //               ),
+    //             ),
+    //           ],
+    //         ),
+    //       ),
+    //     ),
+    //   );
+    // }
 
     return Column(children: timelineItems);
   }
@@ -1096,22 +1418,13 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
   }
 
   Widget _buildLastUpdateCard(double width, double height) {
-    final currentLoc = widget.booking.currentLocation;
+    final currentLoc = _booking.currentLocation;
     final hasCurrentLocation =
         currentLoc != null && currentLoc.lat != null && currentLoc.lng != null;
 
     // Format the last update time
-    String lastUpdateTime = '-';
-    String lastUpdateDate = '';
-    if (currentLoc?.updatedAt != null) {
-      try {
-        final dateTime = DateTime.parse(currentLoc!.updatedAt!);
-        lastUpdateTime = DateFormat('hh:mm a').format(dateTime);
-        lastUpdateDate = DateFormat('dd/MM/yyyy').format(dateTime);
-      } catch (e) {
-        lastUpdateTime = '-';
-      }
-    }
+    String lastUpdateTime = _formatDateTime(currentLoc?.updatedAt);
+    String lastUpdateDate = _formatDate(currentLoc?.updatedAt);
 
     // Get location name
     String locationName = currentLoc?.locationName ?? 'Location not available';
@@ -1212,6 +1525,23 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
     }
   }
 
+  String _formatDateTimeObj(DateTime dateTime) {
+    final hour = dateTime.hour > 12
+        ? dateTime.hour - 12
+        : (dateTime.hour == 0 ? 12 : dateTime.hour);
+    final amPm = dateTime.hour >= 12 ? 'PM' : 'AM';
+    return '${hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')} $amPm';
+  }
+
+  String _formatDuration(int totalSeconds) {
+    if (totalSeconds <= 0) return '';
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    if (hours > 0 && minutes > 0) return '$hours hours $minutes mins';
+    if (hours > 0) return '$hours hours';
+    return '$minutes mins';
+  }
+
   void _centerOnVehicle() {
     if (_expandedMapController == null) {
       debugPrint('Expanded map controller is null');
@@ -1240,6 +1570,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen> {
 
   @override
   void dispose() {
+    _timeAgoTimer?.cancel();
     _smallMapController?.dispose();
     _expandedMapController?.dispose();
     super.dispose();

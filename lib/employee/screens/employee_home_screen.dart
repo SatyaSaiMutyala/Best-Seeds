@@ -17,7 +17,7 @@ class EmployeeDashboard extends StatefulWidget {
 }
 
 class _EmployeeDashboardState extends State<EmployeeDashboard> {
-  int selectedTabIndex = 0;
+  int selectedTabIndex = 1;
   final StorageService _storage = StorageService();
   final AuthRepository _repo = AuthRepository();
   User? _user;
@@ -108,6 +108,11 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
   }
 
   Future<void> _loadBookings() async {
+    final searchText = _searchController.text.trim();
+    final isCacheable = searchText.isEmpty &&
+        _selectedBookingType == null &&
+        _selectedVehicleAvailability == null;
+
     setState(() {
       _isLoading = true;
       _error = null;
@@ -116,17 +121,37 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
       _allBookings = [];
     });
 
+    // Load cached data first for instant display
+    if (isCacheable) {
+      final cached = await _repo.getCachedBookings(_currentTab);
+      if (cached != null && cached.bookings.isNotEmpty && mounted) {
+        setState(() {
+          _allBookings = cached.bookings;
+          _allCount = cached.counts.all;
+          _newCount = cached.counts.newBookings;
+          _currentCount = cached.counts.current;
+          _pastCount = cached.counts.past;
+          _hasMore = cached.pagination.currentPage < cached.pagination.lastPage;
+          _isLoading = false;
+        });
+      }
+    }
+
+    // Fetch fresh data from API
     try {
       final token = _storage.getToken();
       if (token == null) {
-        setState(() {
-          _error = 'Session expired. Please login again.';
-          _isLoading = false;
-        });
+        if (mounted) {
+          setState(() {
+            if (_allBookings.isEmpty) {
+              _error = 'Session expired. Please login again.';
+            }
+            _isLoading = false;
+          });
+        }
         return;
       }
 
-      final searchText = _searchController.text.trim();
       final response = await _repo.getBookingsPage(
         token,
         page: 1,
@@ -135,21 +160,30 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
         bookingType: _selectedBookingType,
         vehicleAvailability: _selectedVehicleAvailability,
       );
-      setState(() {
-        _allBookings = response.bookings;
-        _allCount = response.counts.all;
-        _newCount = response.counts.newBookings;
-        _currentCount = response.counts.current;
-        _pastCount = response.counts.past;
-        _hasMore = response.pagination.currentPage < response.pagination.lastPage;
-        _currentPage = 1;
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _allBookings = response.bookings;
+          _allCount = response.counts.all;
+          _newCount = response.counts.newBookings;
+          _currentCount = response.counts.current;
+          _pastCount = response.counts.past;
+          _hasMore = response.pagination.currentPage < response.pagination.lastPage;
+          _currentPage = 1;
+          _isLoading = false;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _error = e.toString();
-        _isLoading = false;
-      });
+      if (mounted) {
+        if (_allBookings.isEmpty) {
+          setState(() {
+            _error = extractErrorMessage(e);
+            _isLoading = false;
+          });
+        } else {
+          setState(() => _isLoading = false);
+          AppSnackbar.error('Could not refresh bookings');
+        }
+      }
     }
   }
 
@@ -211,7 +245,10 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
       Get.back(); // Close loading
       AppSnackbar.success('Booking accepted successfully');
 
-      // Refresh bookings
+      // Switch to Current tab and refresh bookings
+      setState(() {
+        selectedTabIndex = 2;
+      });
       _loadBookings();
     } catch (e) {
       Get.back(); // Close loading
@@ -705,6 +742,13 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
                             () => _selectedBookingType = 'vehicle'),
                         width: width,
                       ),
+                      _buildFilterChip(
+                        label: 'Vehicle Availability',
+                        isSelected: _selectedBookingType == 'vehicle_availability',
+                        onTap: () => setModalState(
+                            () => _selectedBookingType = 'vehicle_availability'),
+                        width: width,
+                      ),
                     ],
                   ),
                   SizedBox(height: width * 0.05),
@@ -960,6 +1004,7 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
       color: const Color(0xFF0077C8),
       child: ListView.builder(
         controller: _listScrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.all(width * 0.04),
         itemCount: bookings.length + (_hasMore ? 1 : 0),
         itemBuilder: (context, index) {
@@ -1102,7 +1147,7 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
-                  booking.status.label,
+                  booking.status.displayLabel,
                   style: TextStyle(
                     fontSize: width * 0.028,
                     color: _getStatusColor(booking.status),
@@ -1115,9 +1160,10 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
           SizedBox(height: height * 0.015),
 
           // Title and category - only show if data is available
-          if (booking.hatcheryName.isNotEmpty)
-            Text(
-              booking.hatcheryName,
+          Text(
+              booking.hatcheryName.isNotEmpty
+                  ? booking.hatcheryName
+                  : booking.displayBookingType,
               style: TextStyle(
                 fontSize: width * 0.045,
                 fontWeight: FontWeight.bold,
@@ -1438,11 +1484,11 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
 
   Color _getStatusColor(BookingStatus status) {
     if (status.isPending) return Colors.orange;
-    if (status.isAccepted) return Colors.blue;
-    if (status.isInProgress) return Colors.purple;
-    if (status.isDelivered) return Colors.teal;
+    if (status.isConfirmed) return Colors.blue;
+    if (status.isDriverAssigned) return Colors.purple;
+    if (status.isInProgress) return Colors.teal;
     if (status.isCompleted) return Colors.green;
-    if (status.isRejected) return Colors.red;
+    if (status.isFailed) return Colors.red;
     return Colors.grey;
   }
 }

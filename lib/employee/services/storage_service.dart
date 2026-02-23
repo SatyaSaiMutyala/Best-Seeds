@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:bestseeds/driver/models/user_model.dart';
+import 'package:bestseeds/employee/services/booking_cache_service.dart';
 import 'package:bestseeds/main.dart';
 
 class StorageService {
@@ -29,6 +30,7 @@ class StorageService {
 
   Future<void> logout() async {
     await prefs.clear();
+    await EmployeeBookingCacheService().clearAll();
   }
 
   Future<void> saveLocation({

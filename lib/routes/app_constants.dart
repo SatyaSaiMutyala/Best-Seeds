@@ -22,6 +22,7 @@ class AppConstants {
   static String employeeRemoveDriverApi = "vendor/bookings"; // /{bookingId}/remove-driver
   static String employeeAddDriverApi = "vendor/bookings"; // /{bookingId}/add-driver
   static String employeeGetDriversApi = "vendor/drivers"; // GET list of drivers
+  static String employeeBookingTrackingApi = "vendor/bookings"; // /{bookingId}/tracking
 
   // Driver APIs
   static String driverLoginApi = "driver/login";

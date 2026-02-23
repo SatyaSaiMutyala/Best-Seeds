@@ -2,6 +2,7 @@ import 'package:bestseeds/driver/screens/booking_screen.dart';
 import 'package:bestseeds/driver/screens/driver_home_screen.dart';
 import 'package:bestseeds/driver/screens/profile_screen.dart';
 import 'package:bestseeds/driver/screens/tracking_screen.dart';
+import 'package:bestseeds/driver/services/background_location_service.dart';
 import 'package:bestseeds/employee/screens/custom_bottom_nav_bar.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:flutter/material.dart';
@@ -35,11 +36,18 @@ class _DriverMainNavigationScreenState
   Widget build(BuildContext context) {
     return PopScope(
       canPop: false,
-      onPopInvokedWithResult: (didPop, result) {
+      onPopInvokedWithResult: (didPop, result) async {
         if (didPop) return;
         if (_currentIndex != 0) {
           setState(() => _currentIndex = 0);
         } else {
+          // Block exit while a delivery journey is active
+          final journeyActive = await BackgroundLocationService.isRunning();
+          if (journeyActive) {
+            toast('Cannot exit during an active delivery journey');
+            return;
+          }
+
           final now = DateTime.now();
           if (_lastBackPressed != null &&
               now.difference(_lastBackPressed!) < const Duration(seconds: 2)) {

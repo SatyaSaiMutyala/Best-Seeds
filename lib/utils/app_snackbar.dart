@@ -66,5 +66,27 @@ String extractErrorMessage(dynamic error) {
     return 'Something went wrong';
   }
 
+  // Convert raw network/system errors to user-friendly messages
+  final lower = message.toLowerCase();
+  if (lower.contains('socketexception') ||
+      lower.contains('failed host lookup') ||
+      lower.contains('network is unreachable') ||
+      lower.contains('connection refused') ||
+      lower.contains('no address associated') ||
+      lower.contains('clientexception')) {
+    return 'No internet connection. Please check your network and try again.';
+  }
+  if (lower.contains('timeoutexception') || lower.contains('timed out')) {
+    return 'Request timed out. Please try again.';
+  }
+  if (lower.contains('formatexception') ||
+      lower.contains('unexpected character') ||
+      lower.contains('invalid json')) {
+    return 'Invalid server response. Please try again later.';
+  }
+  if (lower.contains('handshakeexception') || lower.contains('certificate')) {
+    return 'Secure connection failed. Please try again later.';
+  }
+
   return message;
 }

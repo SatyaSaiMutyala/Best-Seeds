@@ -45,5 +45,17 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>location</string>
+		<string>processing</string>
+	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Best Seeds needs your location to track delivery routes and update customers with live vehicle positions.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Best Seeds needs your location even when the app is in the background to continuously track your delivery journey and keep customers updated.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Best Seeds needs your location even when the app is in the background to continuously track your delivery journey and keep customers updated.</string>
 </dict>
 </plist>

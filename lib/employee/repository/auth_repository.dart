@@ -3,9 +3,11 @@ import 'dart:io';
 import 'package:bestseeds/driver/models/user_model.dart';
 import 'package:bestseeds/driver/service/auth_service.dart';
 import 'package:bestseeds/employee/models/booking_model.dart';
+import 'package:bestseeds/employee/services/booking_cache_service.dart';
 
 class AuthRepository {
   final AuthService _service = AuthService();
+  final EmployeeBookingCacheService _cache = EmployeeBookingCacheService();
 
   Future<dynamic> employeeLogin(String id, String password) async {
     print('Repository: employeeLogin called');
@@ -88,7 +90,34 @@ class AuthRepository {
       bookingType: bookingType,
       vehicleAvailability: vehicleAvailability,
     );
+
+    // Cache page 1 responses with no search/filters
+    final isCacheable = page == 1 &&
+        (search == null || search.isEmpty) &&
+        bookingType == null &&
+        vehicleAvailability == null;
+    if (isCacheable) {
+      _cache.cacheBookings(tab, res);
+    }
+
     return BookingsResponse.fromJson(res);
+  }
+
+  /// Load bookings from local SQLite cache
+  Future<BookingsResponse?> getCachedBookings(String? tab) async {
+    return _cache.getCachedBookings(tab);
+  }
+
+  /// Fetch fresh tracking data for a single booking
+  Future<Booking> getBookingTracking({
+    required String token,
+    required int bookingId,
+  }) async {
+    final res = await _service.getBookingTracking(
+      token: token,
+      bookingId: bookingId,
+    );
+    return Booking.fromJson(res['booking']);
   }
 
   Future<Map<String, dynamic>> acceptBooking({
@@ -124,6 +153,8 @@ class AuthRepository {
     String? driverName,
     String? driverMobile,
     String? vehicleNumber,
+    double? dropLat,
+    double? dropLng,
   }) async {
     return await _service.updateBooking(
       token: token,
@@ -139,6 +170,8 @@ class AuthRepository {
       driverName: driverName,
       driverMobile: driverMobile,
       vehicleNumber: vehicleNumber,
+      dropLat: dropLat,
+      dropLng: dropLng,
     );
   }
 
@@ -150,7 +183,7 @@ class AuthRepository {
     required String token,
     required int bookingId,
     int? driverId,
-    required String driverName,
+    String? driverName,
     required String driverMobile,
     required String vehicleNumber,
     String? vehicleStartDate,

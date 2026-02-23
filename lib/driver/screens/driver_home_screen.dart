@@ -1,14 +1,20 @@
+import 'dart:io';
+
 import 'package:bestseeds/driver/models/driver_booking_model.dart';
 import 'package:bestseeds/driver/models/driver_model.dart';
 import 'package:bestseeds/driver/repository/driver_auth_repository.dart';
 import 'package:bestseeds/driver/screens/driver_location_tracking.dart';
 import 'package:bestseeds/driver/screens/drop_location_bottomsheet.dart';
 import 'package:bestseeds/driver/screens/profile_screen.dart';
+import 'package:bestseeds/driver/services/background_location_service.dart';
 import 'package:bestseeds/driver/services/driver_storage_service.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:bestseeds/widgets/route_visualization.dart';
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class DriverDashboard extends StatefulWidget {
   const DriverDashboard({super.key});
@@ -18,7 +24,7 @@ class DriverDashboard extends StatefulWidget {
 }
 
 class _DriverDashboardState extends State<DriverDashboard> {
-  int selectedTabIndex = 0;
+  int selectedTabIndex = 2;
   final DriverStorageService _storage = DriverStorageService();
   final DriverAuthRepository _repo = DriverAuthRepository();
   Driver? _driver;
@@ -59,6 +65,18 @@ class _DriverDashboardState extends State<DriverDashboard> {
     _loadDriver();
     _loadLocation();
     _fetchBookings();
+    _checkActiveJourney();
+  }
+
+  /// If the background service is already running (e.g. app was reopened after
+  /// being closed during an active journey), switch to the Live tab.
+  Future<void> _checkActiveJourney() async {
+    final running = await BackgroundLocationService.isRunning();
+    if (running && mounted) {
+      setState(() {
+        selectedTabIndex = 1; // Live tab
+      });
+    }
   }
 
   void _loadLocation() {
@@ -83,37 +101,64 @@ class _DriverDashboardState extends State<DriverDashboard> {
   }
 
   Future<void> _fetchBookings() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    // Load cached data first for instant display
+    final cached = await _repo.getCachedBookings();
+    if (cached != null && cached.routes.isNotEmpty && mounted) {
+      setState(() {
+        _allRoutes = cached.routes;
+        _allCount = cached.counts.all;
+        _liveCount = cached.counts.live;
+        _assignedCount = cached.counts.assigned;
+        _pastCount = cached.counts.past;
+        _filterRoutes();
+        _isLoading = false;
+      });
+    }
+
+    // Fetch fresh data from API
     final token = _storage.getToken();
     if (token == null) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Session expired. Please login again.';
-      });
+      if (mounted) {
+        setState(() {
+          if (_allRoutes.isEmpty) {
+            _errorMessage = 'Session expired. Please login again.';
+          }
+          _isLoading = false;
+        });
+      }
       return;
     }
 
     try {
-      setState(() {
-        _isLoading = true;
-        _errorMessage = null;
-      });
-
       final response = await _repo.getBookings(token);
-      setState(() {
-        _allRoutes = response.routes;
-        // Store counts from backend
-        _allCount = response.counts.all;
-        _liveCount = response.counts.live;
-        _assignedCount = response.counts.assigned;
-        _pastCount = response.counts.past;
-        _filterRoutes();
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _allRoutes = response.routes;
+          _allCount = response.counts.all;
+          _liveCount = response.counts.live;
+          _assignedCount = response.counts.assigned;
+          _pastCount = response.counts.past;
+          _filterRoutes();
+          _isLoading = false;
+        });
+      }
     } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Failed to load bookings. Please try again.';
-      });
+      if (mounted) {
+        if (_allRoutes.isEmpty) {
+          setState(() {
+            _isLoading = false;
+            _errorMessage = 'Failed to load bookings. Please try again.';
+          });
+        } else {
+          setState(() => _isLoading = false);
+          AppSnackbar.error('Could not refresh bookings');
+        }
+      }
       debugPrint('Error fetching bookings: $e');
     }
   }
@@ -763,6 +808,7 @@ class _DriverDashboardState extends State<DriverDashboard> {
       onRefresh: _fetchBookings,
       color: const Color(0xFF0077C8),
       child: ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.all(width * 0.04),
         itemCount: _filteredRoutes.length,
         itemBuilder: (context, index) {
@@ -971,7 +1017,7 @@ class _DriverDashboardState extends State<DriverDashboard> {
         child: ElevatedButton(
           onPressed: () => _startJourney(route),
           style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.green,
+            backgroundColor: const Color(0xFF0077C8),
             padding: EdgeInsets.symmetric(vertical: height * 0.015),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(10),
@@ -995,7 +1041,7 @@ class _DriverDashboardState extends State<DriverDashboard> {
         child: ElevatedButton(
           onPressed: () => _showDropLocationsSheet(route),
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF0077C8),
+            backgroundColor: Colors.orange,
             padding: EdgeInsets.symmetric(vertical: height * 0.015),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(10),
@@ -1126,6 +1172,27 @@ class _DriverDashboardState extends State<DriverDashboard> {
       return;
     }
 
+    // ── Request background-location & notification permissions ──
+    if (Platform.isAndroid) {
+      // 1. Ensure "Allow all the time" location permission
+      final locAlways = await Permission.locationAlways.status;
+      if (!locAlways.isGranted) {
+        final result = await Permission.locationAlways.request();
+        if (!result.isGranted) {
+          AppSnackbar.error(
+              'Background location permission is required to track your delivery.');
+          return;
+        }
+      }
+
+      // 2. Notification permission (Android 13+)
+      final notif = await Permission.notification.status;
+      if (!notif.isGranted) {
+        await Permission.notification.request();
+        // Not blocking – the service can still run without the notification
+      }
+    }
+
     try {
       // Show loading indicator
       showDialog(
@@ -1136,7 +1203,40 @@ class _DriverDashboardState extends State<DriverDashboard> {
         ),
       );
 
-      await _repo.startJourney(token: token, bookingIds: bookingIds);
+      // Get driver's current location to save as start location
+      double? startLat;
+      double? startLng;
+      String? startAddress;
+      try {
+        final position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 10),
+        );
+        startLat = position.latitude;
+        startLng = position.longitude;
+
+        // Reverse geocode to get address
+        final placemarks = await placemarkFromCoordinates(
+          position.latitude,
+          position.longitude,
+        );
+        if (placemarks.isNotEmpty) {
+          final p = placemarks.first;
+          startAddress = [p.subLocality, p.locality, p.administrativeArea]
+              .where((e) => e != null && e.isNotEmpty)
+              .join(', ');
+        }
+      } catch (e) {
+        debugPrint('Could not get start location: $e');
+      }
+
+      await _repo.startJourney(
+        token: token,
+        bookingIds: bookingIds,
+        startLat: startLat,
+        startLng: startLng,
+        startAddress: startAddress,
+      );
 
       // Close loading dialog
       if (mounted) Navigator.pop(context);
@@ -1144,7 +1244,10 @@ class _DriverDashboardState extends State<DriverDashboard> {
       AppSnackbar.success('Journey started successfully');
       debugPrint('START JOURNEY: Starting DriverLocationService');
       DriverLocationService.start(token);
-      // Refresh bookings to update the status
+      // Switch to Live tab and refresh bookings
+      setState(() {
+        selectedTabIndex = 1;
+      });
       _fetchBookings();
     } catch (e) {
       // Close loading dialog
