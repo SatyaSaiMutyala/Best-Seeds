@@ -458,4 +458,50 @@ class AuthService {
       },
     );
   }
+
+  // ==================== Tracking Alert API ====================
+
+  Future<Map<String, dynamic>> sendTrackingAlert({
+    required String token,
+    required String issueType,
+  }) async {
+    return await _apiClient.request(
+      url: AppConstants.baseUrl + AppConstants.driverTrackingAlertApi,
+      method: 'POST',
+      token: token,
+      body: {
+        'issue_type': issueType,
+      },
+    );
+  }
+
+  // ==================== FCM Token Registration ====================
+
+  Future<Map<String, dynamic>> registerDriverFcmToken({
+    required String token,
+    required String fcmToken,
+  }) async {
+    return await _apiClient.request(
+      url: AppConstants.baseUrl + AppConstants.driverRegisterFcmTokenApi,
+      method: 'POST',
+      token: token,
+      body: {
+        'fcm_token': fcmToken,
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> registerVendorFcmToken({
+    required String token,
+    required String fcmToken,
+  }) async {
+    return await _apiClient.request(
+      url: AppConstants.baseUrl + AppConstants.vendorRegisterFcmTokenApi,
+      method: 'POST',
+      token: token,
+      body: {
+        'fcm_token': fcmToken,
+      },
+    );
+  }
 }

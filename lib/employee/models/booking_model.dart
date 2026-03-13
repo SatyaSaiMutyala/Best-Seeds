@@ -22,6 +22,7 @@ class Booking {
   final BookingPickup? pickup;
   final BookingCurrentLocation? currentLocation;
   final BookingDestination? destination;
+  final List<BookingRouteWaypoint> routeWaypoints;
 
   Booking({
     required this.bookingUid,
@@ -47,6 +48,7 @@ class Booking {
     this.pickup,
     this.currentLocation,
     this.destination,
+    this.routeWaypoints = const [],
   });
 
   factory Booking.fromJson(Map<String, dynamic> json) {
@@ -84,6 +86,10 @@ class Booking {
       destination: json['destination'] != null
           ? BookingDestination.fromJson(json['destination'])
           : null,
+      routeWaypoints: (json['route_waypoints'] as List<dynamic>?)
+              ?.map((e) => BookingRouteWaypoint.fromJson(e))
+              .toList() ??
+          [],
     );
   }
 
@@ -357,6 +363,20 @@ class BookingsResponse {
               .toList() ??
           [],
       counts: BookingCounts.fromJson(json['counts'] ?? {}),
+    );
+  }
+}
+
+class BookingRouteWaypoint {
+  final double lat;
+  final double lng;
+
+  BookingRouteWaypoint({required this.lat, required this.lng});
+
+  factory BookingRouteWaypoint.fromJson(Map<String, dynamic> json) {
+    return BookingRouteWaypoint(
+      lat: (json['lat'] ?? 0).toDouble(),
+      lng: (json['lng'] ?? 0).toDouble(),
     );
   }
 }

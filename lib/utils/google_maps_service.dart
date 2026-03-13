@@ -128,20 +128,32 @@ class GoogleMapsService {
   }
 
   /// Get full route from origin to destination with intermediate stops.
-  /// When [driverPosition] is provided, it's used as a waypoint so the route
-  /// goes: origin → driver → destination (two legs with proper road routing).
+  /// When [driverPosition] is provided, the polyline is split into
+  /// completed (green) and remaining (blue) segments.
+  /// Supports multi-drop routes with [routeWaypoints].
   static Future<Map<String, dynamic>> getRouteWithStops({
     required LatLng origin,
     required LatLng destination,
     LatLng? driverPosition,
+    List<LatLng> routeWaypoints = const [],
     int maxStops = 5,
   }) async {
     try {
-      // Build waypoints string if driver position is available
+      // Build waypoints for Directions API
+      // When route waypoints exist (multi-drop), only use drop waypoints — NOT driver position.
+      // The driver position will be used to split the polyline into completed/remaining.
+      // When no route waypoints, use driver position as waypoint (original behavior).
+      List<String> allWaypoints = [];
+      if (routeWaypoints.isNotEmpty) {
+        for (final wp in routeWaypoints) {
+          allWaypoints.add('${wp.latitude},${wp.longitude}');
+        }
+      } else if (driverPosition != null) {
+        allWaypoints.add('${driverPosition.latitude},${driverPosition.longitude}');
+      }
       String waypointsParam = '';
-      if (driverPosition != null) {
-        waypointsParam =
-            '&waypoints=${driverPosition.latitude},${driverPosition.longitude}';
+      if (allWaypoints.isNotEmpty) {
+        waypointsParam = '&waypoints=${allWaypoints.join('|')}';
       }
 
       final url = Uri.parse(
@@ -160,27 +172,92 @@ class GoogleMapsService {
 
       final route = data['routes'][0];
       final legs = route['legs'] as List;
-      final encodedPolyline = route['overview_polyline']['points'] as String;
-      final polylinePoints = _decodePolyline(encodedPolyline);
 
-      // Calculate totals from all legs
+      // Decode per-leg polylines for accuracy
+      List<LatLng> completedPoints = [];
+      List<LatLng> remainingPoints = [];
       int totalDurationSeconds = 0;
       int totalDistanceMeters = 0;
-      for (final leg in legs) {
-        totalDurationSeconds += leg['duration']['value'] as int;
-        totalDistanceMeters += leg['distance']['value'] as int;
-      }
-      final durationText = legs.last['duration']['text'] as String;
-      final distanceText = legs.last['distance']['text'] as String;
+      int remainingSeconds = 0;
+      int completedSeconds = 0;
 
-      // Calculate cumulative distances along polyline
+      if (routeWaypoints.isNotEmpty && driverPosition != null) {
+        // Multi-drop route with driver position:
+        // Route goes: origin → drop1 → drop2 → ... → destination (driver NOT a waypoint)
+        // Split the polyline at the driver's actual position for green/blue coloring
+        List<LatLng> allPoints = [];
+        for (final leg in legs) {
+          allPoints.addAll(_decodeStepsPolyline(leg['steps'] as List));
+          totalDurationSeconds += leg['duration']['value'] as int;
+          totalDistanceMeters += leg['distance']['value'] as int;
+        }
+
+        // Find the closest point on the polyline to the driver's actual position
+        int driverIdx = _findClosestPointIndex(allPoints, driverPosition);
+
+        // Split at driver's actual position
+        completedPoints = allPoints.sublist(0, driverIdx + 1);
+        remainingPoints = allPoints.sublist(driverIdx);
+
+        // Estimate completed/remaining durations by distance fraction
+        double totalDist = 0;
+        for (int i = 1; i < allPoints.length; i++) {
+          totalDist += _haversineDistance(allPoints[i - 1], allPoints[i]);
+        }
+        double completedDist = 0;
+        for (int i = 1; i < completedPoints.length; i++) {
+          completedDist += _haversineDistance(completedPoints[i - 1], completedPoints[i]);
+        }
+        double fraction = totalDist > 0 ? completedDist / totalDist : 0;
+        completedSeconds = (totalDurationSeconds * fraction).round();
+        remainingSeconds = totalDurationSeconds - completedSeconds;
+      } else if (driverPosition != null && legs.length >= 2) {
+        // Single-drop route with driver as waypoint (original behavior)
+        // Leg 0: origin → driver (completed), Leg 1: driver → destination (remaining)
+        completedPoints = _decodeStepsPolyline(legs[0]['steps'] as List);
+        remainingPoints = _decodeStepsPolyline(legs[1]['steps'] as List);
+        completedSeconds = legs[0]['duration']['value'] as int;
+        remainingSeconds = legs[1]['duration']['value'] as int;
+        totalDurationSeconds = completedSeconds + remainingSeconds;
+        totalDistanceMeters = (legs[0]['distance']['value'] as int) +
+            (legs[1]['distance']['value'] as int);
+      } else if (routeWaypoints.isNotEmpty && legs.length >= 2) {
+        // Waypoints but no driver position — all legs combined as remaining
+        for (final leg in legs) {
+          remainingPoints.addAll(_decodeStepsPolyline(leg['steps'] as List));
+          totalDurationSeconds += leg['duration']['value'] as int;
+          totalDistanceMeters += leg['distance']['value'] as int;
+        }
+        remainingSeconds = totalDurationSeconds;
+      } else {
+        // No driver position, no waypoints — single leg, full route as remaining
+        final encodedPolyline =
+            route['overview_polyline']['points'] as String;
+        remainingPoints = _decodePolyline(encodedPolyline);
+        totalDurationSeconds = legs[0]['duration']['value'] as int;
+        totalDistanceMeters = legs[0]['distance']['value'] as int;
+        remainingSeconds = totalDurationSeconds;
+      }
+
+      // Combine for full route polyline
+      List<LatLng> fullPolyline = [...completedPoints, ...remainingPoints];
+      int driverSplitIndex =
+          completedPoints.isNotEmpty ? completedPoints.length - 1 : 0;
+      double driverFraction = totalDurationSeconds > 0
+          ? completedSeconds / totalDurationSeconds
+          : 0;
+
+      // Calculate cumulative distances along full polyline
       List<double> cumulativeDistances = [0.0];
-      for (int i = 1; i < polylinePoints.length; i++) {
+      for (int i = 1; i < fullPolyline.length; i++) {
         double segDist =
-            _haversineDistance(polylinePoints[i - 1], polylinePoints[i]);
+            _haversineDistance(fullPolyline[i - 1], fullPolyline[i]);
         cumulativeDistances.add(cumulativeDistances.last + segDist);
       }
       double totalPolylineDist = cumulativeDistances.last;
+      double driverDistanceOnRoute = driverSplitIndex < cumulativeDistances.length
+          ? cumulativeDistances[driverSplitIndex]
+          : 0;
 
       // Determine number of stops based on route distance (minimum 3)
       int numStops;
@@ -192,48 +269,6 @@ class GoogleMapsService {
         numStops = maxStops; // 500+ km
       }
 
-      // Find driver's position on the route
-      double driverDistanceOnRoute = 0;
-      int driverSplitIndex = 0;
-      int remainingDurationSeconds = totalDurationSeconds;
-
-      if (driverPosition != null && legs.length >= 2) {
-        // With waypoints: leg[0] = origin→driver, leg[1] = driver→drop
-        remainingDurationSeconds = legs[1]['duration']['value'] as int;
-
-        // Find the closest polyline point to driver position for split index
-        double minDist = double.infinity;
-        for (int i = 0; i < polylinePoints.length; i++) {
-          double d = _haversineDistance(driverPosition, polylinePoints[i]);
-          if (d < minDist) {
-            minDist = d;
-            driverSplitIndex = i;
-          }
-        }
-        driverDistanceOnRoute = cumulativeDistances[driverSplitIndex];
-      } else if (driverPosition != null) {
-        // Single leg fallback: project driver onto route
-        double minDist = double.infinity;
-        for (int i = 0; i < polylinePoints.length; i++) {
-          double d = _haversineDistance(driverPosition, polylinePoints[i]);
-          if (d < minDist) {
-            minDist = d;
-            driverSplitIndex = i;
-          }
-        }
-        driverDistanceOnRoute = cumulativeDistances[driverSplitIndex];
-      }
-
-      double driverFraction = totalPolylineDist > 0
-          ? driverDistanceOnRoute / totalPolylineDist
-          : 0;
-
-      // If we didn't get separate legs, calculate remaining from fraction
-      if (driverPosition != null && legs.length < 2) {
-        remainingDurationSeconds =
-            ((1 - driverFraction) * totalDurationSeconds).round();
-      }
-
       // Sample evenly-spaced intermediate stops
       List<Map<String, dynamic>> stops = [];
       if (numStops > 0 && totalPolylineDist > 0) {
@@ -241,10 +276,9 @@ class GoogleMapsService {
         for (int i = 1; i <= numStops; i++) {
           double targetDist = interval * i;
           LatLng point = _interpolatePointOnPolyline(
-              targetDist, polylinePoints, cumulativeDistances);
+              targetDist, fullPolyline, cumulativeDistances);
           double fraction = targetDist / totalPolylineDist;
-          bool passed =
-              driverPosition != null && targetDist <= driverDistanceOnRoute;
+          bool passed = targetDist <= driverDistanceOnRoute;
           stops.add({
             'location': point,
             'distance_fraction': fraction,
@@ -275,15 +309,15 @@ class GoogleMapsService {
       }
 
       return {
-        'polyline_points': polylinePoints,
+        'polyline_points': fullPolyline,
+        'completed_points': completedPoints,
+        'remaining_points': remainingPoints,
         'stops': stops,
         'total_duration_seconds': totalDurationSeconds,
         'total_distance_meters': totalDistanceMeters,
-        'duration_text': durationText,
-        'distance_text': distanceText,
         'driver_split_index': driverSplitIndex,
         'driver_progress_fraction': driverFraction,
-        'remaining_duration_seconds': remainingDurationSeconds,
+        'remaining_duration_seconds': remainingSeconds,
         'cumulative_distances': cumulativeDistances,
       };
     } catch (e) {
@@ -347,6 +381,36 @@ class GoogleMapsService {
     }
 
     return unique;
+  }
+
+  /// Decode polylines from all steps in a Directions API leg
+  static List<LatLng> _decodeStepsPolyline(List steps) {
+    List<LatLng> points = [];
+    for (var step in steps) {
+      final stepPoints =
+          _decodePolyline(step['polyline']['points'] as String);
+      if (points.isNotEmpty && stepPoints.isNotEmpty) {
+        // Skip first point of subsequent steps to avoid duplicates
+        points.addAll(stepPoints.sublist(1));
+      } else {
+        points.addAll(stepPoints);
+      }
+    }
+    return points;
+  }
+
+  /// Find the index of the closest point on a polyline to the given position
+  static int _findClosestPointIndex(List<LatLng> points, LatLng target) {
+    int closestIdx = 0;
+    double minDist = double.infinity;
+    for (int i = 0; i < points.length; i++) {
+      double dist = _haversineDistance(points[i], target);
+      if (dist < minDist) {
+        minDist = dist;
+        closestIdx = i;
+      }
+    }
+    return closestIdx;
   }
 
   /// Interpolate a point along the polyline at a given cumulative distance

@@ -326,25 +326,25 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
                           ),
                         ),
                       ),
-                      SizedBox(height: height * 0.015),
+                      // SizedBox(height: height * 0.015),
 
                       /// Select from Map Button
-                      SizedBox(
-                        width: double.infinity,
-                        height: height * 0.06,
-                        child: OutlinedButton.icon(
-                          onPressed: _isLoading ? null : _selectFromMap,
-                          icon: const Icon(Icons.map_outlined),
-                          label: const Text('Select from Map'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFF0077C8),
-                            side: const BorderSide(color: Color(0xFF0077C8)),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
-                        ),
-                      ),
+                      // SizedBox(
+                      //   width: double.infinity,
+                      //   height: height * 0.06,
+                      //   child: OutlinedButton.icon(
+                      //     onPressed: _isLoading ? null : _selectFromMap,
+                      //     icon: const Icon(Icons.map_outlined),
+                      //     label: const Text('Select from Map'),
+                      //     style: OutlinedButton.styleFrom(
+                      //       foregroundColor: const Color(0xFF0077C8),
+                      //       side: const BorderSide(color: Color(0xFF0077C8)),
+                      //       shape: RoundedRectangleBorder(
+                      //         borderRadius: BorderRadius.circular(14),
+                      //       ),
+                      //     ),
+                      //   ),
+                      // ),
                       SizedBox(height: height * 0.025),
 
                       /// Continue Button

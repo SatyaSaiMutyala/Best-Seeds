@@ -260,15 +260,26 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
     /// -------- Route + Intermediate Stops using single Directions API call --------
     if (_pickupLatLng != null && _destinationLatLng != null) {
+      // Convert route waypoints (intermediate drops) to LatLng for multi-drop routing
+      final waypoints = _booking.routeWaypoints
+          .where((wp) => wp.lat != 0 && wp.lng != 0)
+          .map((wp) => LatLng(wp.lat, wp.lng))
+          .toList();
+
       final routeData = await GoogleMapsService.getRouteWithStops(
         origin: _pickupLatLng!,
         destination: _destinationLatLng!,
         driverPosition: _currentLatLng,
+        routeWaypoints: waypoints,
       );
 
       if (routeData.isNotEmpty) {
         final polylinePoints =
             routeData['polyline_points'] as List<LatLng>? ?? [];
+        final completedPoints =
+            routeData['completed_points'] as List<LatLng>? ?? [];
+        final remainingPointsList =
+            routeData['remaining_points'] as List<LatLng>? ?? [];
         _routeStops = routeData['stops'] as List<Map<String, dynamic>>? ?? [];
         _totalRouteDurationSeconds =
             routeData['total_duration_seconds'] as int? ?? 0;
@@ -277,7 +288,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                 ?.cast<double>() ??
             [];
 
-        final driverSplitIndex = routeData['driver_split_index'] as int? ?? 0;
         final driverFraction =
             routeData['driver_progress_fraction'] as double? ?? 0.0;
         final remainingSeconds =
@@ -299,37 +309,39 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         }
 
         if (polylinePoints.isNotEmpty) {
-          if (_currentLatLng != null &&
-              driverSplitIndex > 0 &&
-              driverSplitIndex < polylinePoints.length) {
+          if (_currentLatLng != null && completedPoints.isNotEmpty) {
             // Green solid line: pickup to driver position (completed)
             polylines.add(
               Polyline(
                 polylineId: const PolylineId('completed'),
-                points: polylinePoints.sublist(0, driverSplitIndex + 1),
+                points: completedPoints,
                 color: Colors.green,
                 width: 5,
               ),
             );
             // Blue dashed line: driver position to destination (remaining)
-            polylines.add(
-              Polyline(
-                polylineId: const PolylineId('remaining'),
-                points: polylinePoints.sublist(driverSplitIndex),
-                color: const Color(0xFF0077C8),
-                width: 5,
-                patterns: [
-                  PatternItem.dash(20),
-                  PatternItem.gap(10),
-                ],
-              ),
-            );
+            if (remainingPointsList.isNotEmpty) {
+              polylines.add(
+                Polyline(
+                  polylineId: const PolylineId('remaining'),
+                  points: remainingPointsList,
+                  color: const Color(0xFF0077C8),
+                  width: 5,
+                  patterns: [
+                    PatternItem.dash(20),
+                    PatternItem.gap(10),
+                  ],
+                ),
+              );
+            }
           } else {
             // No current location — full route as dashed blue
             polylines.add(
               Polyline(
                 polylineId: const PolylineId('full_route'),
-                points: polylinePoints,
+                points: remainingPointsList.isNotEmpty
+                    ? remainingPointsList
+                    : polylinePoints,
                 color: const Color(0xFF0077C8),
                 width: 5,
                 patterns: [
@@ -1339,17 +1351,34 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           } else {
             pickupTime = _formatDateTime(pickup?.vehicleStartedDate);
           }
+
+          // Get fractions for sub-stop generation
+          final pickupNextFraction = entries.length > 1 ? _getFractionForEntry(entries[1]) : 0.0;
+          final isPickupExpanded = _expandedSegmentIndex == segIdx;
+          final isPickupLoading = _loadingSegment == segIdx;
+
+          // Pickup item FIRST
           timelineItems.add(
-            _buildTimelineItem(
-              width, height,
-              Icons.location_on,
-              hasCurrentLocation ? Colors.green : Colors.grey,
-              'Pickup started from',
-              pickup?.locationName ?? _booking.hatcheryName,
-              pickupTime,
-              isFirst: true,
+            GestureDetector(
+              onTap: () => _onTimelineTap(segIdx, 0.0, pickupNextFraction),
+              child: _buildTimelineItem(
+                width, height,
+                isPickupExpanded ? Icons.keyboard_arrow_up : Icons.location_on,
+                hasCurrentLocation ? Colors.green : Colors.grey,
+                'Pickup started from',
+                pickup?.locationName ?? _booking.hatcheryName,
+                pickupTime,
+                isFirst: true,
+              ),
             ),
           );
+
+          // Sub-timeline AFTER (below pickup)
+          if (isPickupExpanded || isPickupLoading) {
+            timelineItems.add(
+              _buildSubTimeline(width, height, segIdx, isPickupLoading, Colors.green),
+            );
+          }
           break;
 
         case 'stop':
@@ -1368,13 +1397,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           final isExpanded = _expandedSegmentIndex == segIdx;
           final isLoading = _loadingSegment == segIdx;
 
-          // Sub-stops (shown above this item when expanded)
-          if (isExpanded || isLoading) {
-            timelineItems.add(
-              _buildSubTimeline(width, height, segIdx, isLoading, color),
-            );
-          }
-
+          // Stop item FIRST
           timelineItems.add(
             GestureDetector(
               onTap: () => _onTimelineTap(segIdx, prevFraction, currentFraction),
@@ -1389,6 +1412,13 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
               ),
             ),
           );
+
+          // Sub-stops shown BELOW this stop item
+          if (isExpanded || isLoading) {
+            timelineItems.add(
+              _buildSubTimeline(width, height, segIdx, isLoading, color),
+            );
+          }
           break;
 
         case 'driver':
@@ -1398,12 +1428,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           final isExpanded = _expandedSegmentIndex == segIdx;
           final isLoading = _loadingSegment == segIdx;
 
-          if (isExpanded || isLoading) {
-            timelineItems.add(
-              _buildSubTimeline(width, height, segIdx, isLoading, Colors.green),
-            );
-          }
-
+          // Driver item FIRST
           timelineItems.add(
             GestureDetector(
               onTap: () => _onTimelineTap(segIdx, prevFraction, currentFraction),
@@ -1419,6 +1444,13 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
               ),
             ),
           );
+
+          // Sub-stops shown BELOW driver item
+          if (isExpanded || isLoading) {
+            timelineItems.add(
+              _buildSubTimeline(width, height, segIdx, isLoading, Colors.green),
+            );
+          }
           break;
 
         case 'destination':

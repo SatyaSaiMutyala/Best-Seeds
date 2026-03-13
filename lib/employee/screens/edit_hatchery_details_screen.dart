@@ -1060,8 +1060,11 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
         ? DateTime.tryParse(existingDriver.vehicleEndDate!)
         : null;
 
-    // Pre-fill priority from existing driver data
-    int? selectedPriority = isEditing ? existingDriver.priority : null;
+    // Pre-fill priority from existing driver data (must be within 1-10 range)
+    final existingPriority = isEditing ? existingDriver.priority : null;
+    int? selectedPriority = (existingPriority != null && existingPriority >= 1 && existingPriority <= 10)
+        ? existingPriority
+        : null;
 
     // Pre-fill location from existing driver data
     double? vehicleStartLat = isEditing ? existingDriver.vehicleStartLat : null;

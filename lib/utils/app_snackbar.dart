@@ -81,8 +81,9 @@ String extractErrorMessage(dynamic error) {
   }
   if (lower.contains('formatexception') ||
       lower.contains('unexpected character') ||
-      lower.contains('invalid json')) {
-    return 'Invalid server response. Please try again later.';
+      lower.contains('invalid json') ||
+      lower.contains('<html')) {
+    return 'Server is temporarily unavailable. Please try again later.';
   }
   if (lower.contains('handshakeexception') || lower.contains('certificate')) {
     return 'Secure connection failed. Please try again later.';

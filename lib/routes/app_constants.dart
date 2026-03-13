@@ -36,4 +36,9 @@ class AppConstants {
   static String driverUpdateDropStatusApi = "driver/update-drop-status";
   static String driverLocationUpdateApi = "driver/location/update";
   static String driverUpdateCurrentLocationApi = "driver/update-location";
+  static String driverTrackingAlertApi = "driver/tracking-alert";
+  static String driverRegisterFcmTokenApi = "driver/register-fcm-token";
+
+  // Vendor/Employee FCM
+  static String vendorRegisterFcmTokenApi = "vendor/register-fcm-token";
 }

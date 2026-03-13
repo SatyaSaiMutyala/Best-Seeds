@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 const String _baseUrl =
     'https://aliceblue-wallaby-326294.hostingersite.com/api/';
 const String _locationUpdateEndpoint = 'driver/location/update';
+const String _trackingAlertEndpoint = 'driver/tracking-alert';
 const String _googleApiKey = 'AIzaSyDLVwCSkXWOjo49WNNwx7o0DSwomoFvbP0';
 const String _tokenKey = 'driver_token';
 const String _serviceRunningKey = 'bg_location_service_running';
@@ -213,6 +214,29 @@ Future<void> _onStart(ServiceInstance service) async {
     }
   }
 
+  // ---------- Helper: send tracking alert to backend (notifies vendor + admin) ----------
+  Future<void> sendTrackingAlert(String issueType) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString(_tokenKey);
+      if (token == null || token.isEmpty) return;
+
+      await http.post(
+        Uri.parse('$_baseUrl$_trackingAlertEndpoint'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({'issue_type': issueType}),
+      ).timeout(const Duration(seconds: 10));
+
+      print('BackgroundLocationService: Tracking alert sent -> $issueType');
+    } catch (e) {
+      print('BackgroundLocationService: Failed to send tracking alert: $e');
+    }
+  }
+
   // ---------- Helper: show a loud alert notification ----------
   // Uses a 3-minute cooldown so alerts repeat periodically while GPS/internet
   // stays off, instead of firing only once.
@@ -234,6 +258,10 @@ Future<void> _onStart(ServiceInstance service) async {
 
     lastAlertTime = DateTime.now();
     print('BackgroundLocationService: ALERT — $title: $body');
+
+    // Determine issue type from title and notify vendor + admin via backend
+    final issueType = title.contains('GPS') ? 'gps_off' : 'internet_off';
+    sendTrackingAlert(issueType); // fire-and-forget, don't await
 
     // FLAG_INSISTENT (4) makes the default notification sound loop continuously
     // until dismissed. Auto-cancel after 15 seconds.

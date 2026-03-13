@@ -127,12 +127,19 @@ class ApiClient {
       throw Exception('Empty response from server. Please try again.');
     }
 
+    // Check if response is HTML (server error page) before parsing
+    final bodyTrimmed = response.body.trimLeft();
+    if (bodyTrimmed.startsWith('<') || bodyTrimmed.startsWith('<!')) {
+      print('API CLIENT: Server returned HTML instead of JSON');
+      throw Exception('Server is temporarily unavailable. Please try again later.');
+    }
+
     // Parse JSON safely
     dynamic data;
     try {
       data = jsonDecode(response.body);
     } on FormatException {
-      throw Exception('Invalid server response. Please try again later.');
+      throw Exception('Server is temporarily unavailable. Please try again later.');
     }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -208,12 +215,19 @@ class ApiClient {
       throw Exception('Empty response from server. Please try again.');
     }
 
+    // Check if response is HTML (server error page) before parsing
+    final bodyTrimmed = response.body.trimLeft();
+    if (bodyTrimmed.startsWith('<') || bodyTrimmed.startsWith('<!')) {
+      print('API CLIENT MULTIPART: Server returned HTML instead of JSON');
+      throw Exception('Server is temporarily unavailable. Please try again later.');
+    }
+
     // Parse JSON safely
     dynamic data;
     try {
       data = jsonDecode(response.body);
     } on FormatException {
-      throw Exception('Invalid server response. Please try again later.');
+      throw Exception('Server is temporarily unavailable. Please try again later.');
     }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
