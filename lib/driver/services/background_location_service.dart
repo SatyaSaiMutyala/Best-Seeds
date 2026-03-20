@@ -14,12 +14,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 // --- Constants (duplicated here because this file must be self-contained
 //     for the background isolate; it cannot import Flutter-widget-dependent files) ---
-// const String _baseUrl =
-//     'https://bestseed.in/api/';
+const String _baseUrl =
+    'https://bestseed.in/api/';
 // const String _baseUrl =
 //     'http://192.168.29.111:8000/api/';
-const String _baseUrl =
-    'http://127.0.0.1:8000/api/';
+// const String _baseUrl =
+//     'http://127.0.0.1:8000/api/';
 const String _locationUpdateEndpoint = 'driver/location/update';
 const String _trackingAlertEndpoint = 'driver/tracking-alert';
 const String _googleApiKey = 'AIzaSyDLVwCSkXWOjo49WNNwx7o0DSwomoFvbP0';
@@ -91,7 +91,7 @@ class BackgroundLocationService {
         autoStartOnBoot: true,
         isForegroundMode: true,
         foregroundServiceNotificationId: _notificationId,
-        initialNotificationTitle: 'Best Seeds',
+        initialNotificationTitle: 'Bestseed',
         initialNotificationContent: 'Tracking your delivery journey...',
         notificationChannelId: _notificationChannelId,
         foregroundServiceTypes: [AndroidForegroundType.location],
@@ -242,7 +242,7 @@ Future<void> _onStart(ServiceInstance service) async {
   void updateNotification(String content) {
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(
-        title: 'Best Seeds - Delivering',
+        title: 'Bestseed - Delivering',
         content: content,
       );
     }
@@ -432,7 +432,7 @@ Future<void> _onStart(ServiceInstance service) async {
           'lng': position.longitude,
           'location_name': locationName ?? 'Live vehicle location',
         }),
-      ).timeout(const Duration(seconds: 20));
+      ).timeout(const Duration(seconds: 30));
 
       print('BackgroundLocationService: API Response ${response.statusCode}');
 
@@ -472,23 +472,29 @@ Future<void> _onStart(ServiceInstance service) async {
     } on TimeoutException {
       print('BackgroundLocationService: API call timed out, will retry.');
       consecutiveFailures++;
-      isOnline = false;
       _queuePosition(position);
-      updateNotification('No internet - will retry when connected...');
-      await showErrorAlert(
-        title: 'Internet Issue!',
-        body: 'Please turn on your internet. Location tracking needs internet to send your location.',
-      );
+      updateNotification('Slow network - retrying...');
+      // Only show alert after 3+ consecutive failures to avoid false alarms
+      if (consecutiveFailures >= 3) {
+        isOnline = false;
+        await showErrorAlert(
+          title: 'Internet Issue!',
+          body: 'Please check your internet connection. Location updates are failing.',
+        );
+      }
     } catch (e) {
       print('BackgroundLocationService: Network error: $e');
       consecutiveFailures++;
-      isOnline = false;
       _queuePosition(position);
-      updateNotification('No internet - will retry when connected...');
-      await showErrorAlert(
-        title: 'Internet Issue!',
-        body: 'Please turn on your internet. Location tracking needs internet to send your location.',
-      );
+      updateNotification('Network issue - retrying...');
+      // Only show alert after 3+ consecutive failures to avoid false alarms
+      if (consecutiveFailures >= 3) {
+        isOnline = false;
+        await showErrorAlert(
+          title: 'Internet Issue!',
+          body: 'Please check your internet connection. Location updates are failing.',
+        );
+      }
     }
 
     return true;
@@ -759,8 +765,10 @@ Future<void> _onStart(ServiceInstance service) async {
 
       // Trigger immediate fresh position
       await fallbackPoll();
-    } else if (!nowOnline && isOnline) {
-      print('BackgroundLocationService: Connectivity lost.');
+    } else if (!nowOnline && isOnline && consecutiveFailures >= 3) {
+      // Only mark offline if API calls are also failing (consecutiveFailures >= 3)
+      // DNS lookup can fail even when API works fine on some networks
+      print('BackgroundLocationService: Connectivity lost (confirmed by failures).');
       isOnline = false;
     }
   });

@@ -160,7 +160,7 @@ class _SplashScreenState extends State<SplashScreen> {
             ),
             SizedBox(height: width * 0.06),
             Text(
-              'Best Seeds',
+              'Bestseed',
               style: TextStyle(
                 color: Colors.white,
                 fontSize: width * 0.08,

@@ -120,7 +120,7 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
 
                           Center(
                             child: Text(
-                              'Secure Access for \n Best Seeds Employees',
+                              'Secure Access for \n Bestseed Employees',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: width * 0.07,
@@ -162,7 +162,7 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            'Log in with your Best Seeds ID',
+                            'Log in with your Bestseed ID',
                             style: TextStyle(
                               fontSize: width * 0.045,
                               fontWeight: FontWeight.w600,
@@ -186,7 +186,7 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
                                     controller: idCtrl,
                                     keyboardType: TextInputType.text,
                                     decoration: const InputDecoration(
-                                      hintText: 'Enter Best Seeds ID',
+                                      hintText: 'Enter Bestseed ID',
                                       border: InputBorder.none,
                                     ),
                                   ),

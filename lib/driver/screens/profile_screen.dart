@@ -48,7 +48,7 @@ class DriverProfileScreen extends StatelessWidget {
                       title: 'Share this app',
                       onTap: () {
                         Share.share(
-                          'Check out Best Seeds - the best app for seed delivery management!\nhttps://play.google.com/store/apps/details?id=com.bestseeds.app',
+                          'Check out Bestseed - the best app for seed delivery management!\nhttps://play.google.com/store/apps/details?id=com.bestseeds.app',
                         );
                       },
                     ),
