@@ -139,7 +139,7 @@ class DriverRoute {
   int get routeStatus {
     if (bookings.isEmpty) return 0;
 
-    // If any booking is in transit (4), route is in transit
+    // If any booking is in journey (4), route is in journey
     if (bookings.any((b) => b.status == 4)) return 4;
 
     // If any booking is confirmed (3), route is confirmed
@@ -281,7 +281,7 @@ class DropBooking {
       case 3:
         return 'Confirmed';
       case 4:
-        return 'In Transit';
+        return 'In Journey';
       case 5:
         return 'Delivered';
       case 6:
@@ -297,7 +297,7 @@ class DropBooking {
   /// Check if drop is confirmed
   bool get isConfirmed => status == 3;
 
-  /// Check if drop is in transit
+  /// Check if drop is in journey
   bool get isInTransit => status == 4;
 
   /// Check if drop is delivered

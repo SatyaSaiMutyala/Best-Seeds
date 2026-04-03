@@ -12,11 +12,18 @@ class GoogleMapsService {
     required LatLng origin,
     required LatLng destination,
     List<LatLng>? waypoints,
+    bool useViaWaypoints = false,
   }) async {
     try {
       String waypointsStr = '';
       if (waypoints != null && waypoints.isNotEmpty) {
-        waypointsStr = '&waypoints=${waypoints.map((wp) => '${wp.latitude},${wp.longitude}').join('|')}';
+        if (useViaWaypoints) {
+          waypointsStr =
+              '&waypoints=${waypoints.map((wp) => 'via:${wp.latitude},${wp.longitude}').join('|')}';
+        } else {
+          waypointsStr =
+              '&waypoints=${waypoints.map((wp) => '${wp.latitude},${wp.longitude}').join('|')}';
+        }
       }
 
       final url = Uri.parse(

@@ -250,9 +250,6 @@ class TrackingScreen extends StatelessWidget {
                       MaterialPageRoute(
                         builder: (context) => VehicleTrackingMapScreen(
                           bookingId: id,
-                          title: title,
-                          driverName: 'Ramesh',
-                          vehicleNumber: 'TSN05656',
                         ),
                       ),
                     );

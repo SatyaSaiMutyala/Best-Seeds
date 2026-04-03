@@ -276,7 +276,7 @@ class _EditVehicleDetailsScreenState extends State<EditVehicleDetailsScreen> {
           children: [
             _buildStatusOption(0, 'Journey Started', width),
             SizedBox(width: width * 0.03),
-            _buildStatusOption(1, 'In Transit', width),
+            _buildStatusOption(1, 'In Journey', width),
             SizedBox(width: width * 0.03),
             _buildStatusOption(2, 'Delivered', width),
           ],
@@ -552,7 +552,7 @@ class _EditVehicleDetailsScreenState extends State<EditVehicleDetailsScreen> {
                         fontSize: width * 0.035,
                         color: Colors.grey.shade700,
                       ),
-                      items: ['Pending', 'In Transit', 'Completed']
+                      items: ['Pending', 'In Journey', 'Completed']
                           .map((String value) {
                         return DropdownMenuItem<String>(
                           value: value,

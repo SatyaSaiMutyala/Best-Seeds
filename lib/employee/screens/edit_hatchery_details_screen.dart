@@ -61,6 +61,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
   double? _selectedLongitude;
   bool _isRemovingDriver = false;
   bool _isSaving = false;
+  bool _hasChanges = false;
   int? _selectedBookingStatus;
   int? _selectedDeliveryReason;
 
@@ -68,7 +69,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
     1: 'Pending',
     2: 'Confirmed',
     3: 'Driver Assigned',
-    4: 'In Transit',
+    4: 'In Journey',
     5: 'Delivered',
     6: 'Failed',
   };
@@ -269,7 +270,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
         _selectedBookingStatus != widget.booking.status.value) {
       if (_selectedBookingStatus == 5 && widget.booking.status.value != 4) {
         AppSnackbar.error(
-            'Booking must be In Transit to mark as Delivered');
+            'Booking must be In Journey to mark as Delivered');
         return;
       }
       if (_selectedBookingStatus == 6 && _selectedDeliveryReason == null) {
@@ -333,11 +334,12 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
     final width = MediaQuery.of(context).size.width;
     final height = MediaQuery.of(context).size.height;
 
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: Column(
-          children: [
+    return PopScope(
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        body: SafeArea(
+          child: Column(
+            children: [
             /// ================= Header =================
             _buildHeader(context, width, height),
 
@@ -486,9 +488,10 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
               ),
             ),
 
-            /// ================= Save Button =================
-            _buildSaveButton(width, height),
-          ],
+              /// ================= Save Button =================
+              _buildSaveButton(width, height),
+            ],
+          ),
         ),
       ),
     );
@@ -668,7 +671,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
         children: [
           GestureDetector(
             onTap: () {
-              Navigator.pop(context);
+              Navigator.pop(context, _hasChanges);
             },
             child: Icon(
               Icons.arrow_back,
@@ -1752,6 +1755,9 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
 
                                   AppSnackbar.success(
                                       'Driver assigned successfully');
+                                  if (mounted) {
+                                    setState(() => _hasChanges = true);
+                                  }
                                   if (context.mounted) {
                                     Navigator.pop(
                                         context); // Close bottom sheet

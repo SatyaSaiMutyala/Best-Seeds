@@ -459,6 +459,20 @@ class AuthService {
     );
   }
 
+  // ==================== Vehicle Tracking API ====================
+
+  Future<Map<String, dynamic>> getDriverVehicleTracking({
+    required String token,
+    required String bookingId,
+  }) {
+    return _apiClient.request(
+      url: '${AppConstants.baseUrl}${AppConstants.driverVehicleTrackingApi}/$bookingId',
+      body: {},
+      method: 'GET',
+      token: token,
+    );
+  }
+
   // ==================== Tracking Alert API ====================
 
   Future<Map<String, dynamic>> sendTrackingAlert({

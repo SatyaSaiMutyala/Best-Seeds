@@ -1,26 +1,23 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:bestseeds/employee/models/booking_model.dart';
-import 'package:bestseeds/employee/repository/auth_repository.dart';
 import 'package:bestseeds/employee/services/storage_service.dart';
-import 'package:bestseeds/utils/app_snackbar.dart';
+import 'package:bestseeds/widgets/refresh_button.dart';
 import 'package:bestseeds/utils/custom_marker_helper.dart';
 import 'package:bestseeds/utils/google_maps_service.dart';
-import 'package:bestseeds/widgets/refresh_button.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
-import 'package:flutter/material.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:intl/intl.dart';
+import 'package:bestseeds/driver/models/specific_vehicle_tracking_response.dart';
+import 'package:bestseeds/driver/service/auth_service.dart';
 
 class VehicleTrackingMapScreen extends StatefulWidget {
   final Booking booking;
 
-  const VehicleTrackingMapScreen({
-    super.key,
-    required this.booking,
-  });
+  const VehicleTrackingMapScreen({super.key, required this.booking});
 
   @override
   State<VehicleTrackingMapScreen> createState() =>
@@ -29,12 +26,8 @@ class VehicleTrackingMapScreen extends StatefulWidget {
 
 class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     with TickerProviderStateMixin {
-  // Mutable booking reference (updated on refresh)
-  late Booking _booking;
-
-  // Repository and storage for refresh
-  final AuthRepository _repo = AuthRepository();
-  final StorageService _storage = StorageService();
+  final AuthService _authService = AuthService();
+  final StorageService _storageService = StorageService();
 
   // Separate controllers for small and expanded maps
   GoogleMapController? _smallMapController;
@@ -57,6 +50,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   bool _isMapExpanded = false;
 
   // Loading state for directions
+  bool _isLoading = true;
   bool _isLoadingRoute = true;
 
   // Custom markers for small map (smaller size)
@@ -74,6 +68,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   LatLng? _currentLatLng;
   LatLng? _destinationLatLng;
 
+  // Tracking data
+  TrackingData? _trackingData;
+
   // Estimated delivery time from vehicle to destination
   String _estimatedDuration = '';
 
@@ -82,12 +79,28 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   DateTime? _routeStartTime;
   int _totalRouteDurationSeconds = 0;
 
-  // Sub-timeline state
+  // Full polyline data for sub-stop generation
   List<LatLng> _fullPolyline = [];
   List<double> _cumulativeDistances = [];
+
+  // Expandable sub-timelines
   int? _expandedSegmentIndex;
   Map<int, List<Map<String, dynamic>>> _subStopsCache = {};
   int? _loadingSegment;
+
+  // ── FIXED TIMELINE (Layer 1: Business milestones — NEVER changes) ──
+  // Generated once from full pickup→destination route, persisted to storage.
+  List<Map<String, dynamic>> _fixedStops = [];
+  bool _isLoadingFixedStops = true;
+  bool _fixedStopsGenerated = false;
+  int _currentStopIndex = -1; // -1 = not started, 0 = at/past first stop, etc.
+  DateTime? _lastProgressUpdateTime; // Cooldown to prevent GPS jitter
+  Map<int, String> _passedStopTimes = {}; // Locked times for passed stops
+
+  // Full pickup→destination polyline (for fixed stop generation)
+  List<LatLng> _fullRoutePolyline = [];
+  List<double> _fullRouteCumulativeDistances = [];
+  int _fullRouteDurationSeconds = 0;
 
   // Refresh state
   DateTime _lastRefreshedAt = DateTime.now();
@@ -102,7 +115,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   @override
   void initState() {
     super.initState();
-    _booking = widget.booking;
 
     // Setup pulse animation for vehicle icon
     _pulseController = AnimationController(
@@ -127,41 +139,64 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     });
   }
 
-  Future<void> _initializeMap() async {
-    final currentLoc = _booking.currentLocation;
-
-    // Get current vehicle position from API
-    if (currentLoc != null &&
-        currentLoc.lat != null &&
-        currentLoc.lng != null) {
-      _currentVehiclePosition = LatLng(currentLoc.lat!, currentLoc.lng!);
-    } else {
-      _currentVehiclePosition = _defaultLocation;
+  Future<void> _fetchTrackingData() async {
+    final token = _storageService.getToken();
+    if (token == null || token.isEmpty) {
+      throw Exception('Session expired. Please login again.');
     }
 
-    // Set initial camera position - will be updated to fit all markers
-    _initialPosition = CameraPosition(
-      target: _currentVehiclePosition,
-      zoom: 10.0, // Lower zoom to show more area initially
+    final response = await _authService.getDriverVehicleTracking(
+      token: token,
+      bookingId: widget.booking.bookingId.toString(),
     );
 
-    // Load custom markers first (both sizes)
-    await _loadCustomMarkers();
-
-    // Then setup markers and routes
-    try {
-      await _setupMarkersAndPolylines();
-    } catch (e) {
-      debugPrint('Error setting up map markers/routes: $e');
-      if (mounted) {
-        setState(() => _isLoadingRoute = false);
-        AppSnackbar.error('Failed to load route. Please try refreshing.');
-      }
+    if (response['status'] != true || response['data'] == null) {
+      throw Exception(response['message']?.toString() ?? 'No tracking data found');
     }
 
-    setState(() {
-      _lastRefreshedAt = DateTime.now();
-    });
+    final parsed = SpecificVehicleTrackingResponse.fromJson(response);
+    _trackingData = parsed.data;
+  }
+
+  Future<void> _initializeMap() async {
+    try {
+      await _fetchTrackingData();
+      if (_trackingData == null) {
+        setState(() {
+          _isLoadingRoute = false;
+          _isLoading = false;
+        });
+        return;
+      }
+
+      final driverLoc = _trackingData!.driverLocation;
+
+      if (driverLoc.lat != 0 && driverLoc.lng != 0) {
+        _currentVehiclePosition = LatLng(driverLoc.lat, driverLoc.lng);
+      } else {
+        _currentVehiclePosition = _defaultLocation;
+      }
+
+      _initialPosition = CameraPosition(
+        target: _currentVehiclePosition,
+        zoom: 10.0,
+      );
+
+      await _loadCustomMarkers();
+      await _setupMarkersAndPolylines();
+
+      setState(() {
+        _lastRefreshedAt = DateTime.now();
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _isLoadingRoute = false;
+        });
+      }
+    }
   }
 
   Future<void> _refreshData() async {
@@ -169,36 +204,70 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     setState(() => _isRefreshing = true);
 
     try {
-      final token = _storage.getToken();
-      if (token != null) {
-        final freshBooking = await _repo.getBookingTracking(
-          token: token,
-          bookingId: _booking.bookingId,
-        );
+      final oldPickup = _trackingData?.pickup;
+      final oldDrop = _trackingData?.drop;
+      await _fetchTrackingData();
+      final newData = _trackingData;
 
-        _booking = freshBooking;
+      if (newData != null) {
+        _trackingData = newData;
 
-        final currentLoc = _booking.currentLocation;
-        if (currentLoc != null &&
-            currentLoc.lat != null &&
-            currentLoc.lng != null) {
-          _currentVehiclePosition = LatLng(currentLoc.lat!, currentLoc.lng!);
+        final driverLoc = newData.driverLocation;
+        if (driverLoc.lat != 0 && driverLoc.lng != 0) {
+          _currentVehiclePosition = LatLng(driverLoc.lat, driverLoc.lng);
+          _currentLatLng = LatLng(driverLoc.lat, driverLoc.lng);
         }
 
-        // Reset route data
-        _routeStops = [];
-        _routeStartTime = null;
-        _totalRouteDurationSeconds = 0;
-        _estimatedDuration = '';
-        _fullPolyline = [];
-        _cumulativeDistances = [];
-        _expandedSegmentIndex = null;
-        _subStopsCache = {};
-        _loadingSegment = null;
+        setState(() => _isLoadingRoute = true);
 
-        await _setupMarkersAndPolylines();
+        // Check if route endpoints changed (rare — usually only driver moves)
+        final routeChanged = oldPickup?.name != newData.pickup.name ||
+            oldDrop?.name != newData.drop.name;
 
-        // Re-fit maps
+        if (routeChanged) {
+          // Full rebuild only when pickup/destination actually changes
+          _routeStops = [];
+          _routeStartTime = null;
+          _totalRouteDurationSeconds = 0;
+          _estimatedDuration = '';
+          _fullPolyline = [];
+          _cumulativeDistances = [];
+          _expandedSegmentIndex = null;
+          _subStopsCache = {};
+          _loadingSegment = null;
+          // Reset fixed timeline so it regenerates from new full route
+          _fixedStopsGenerated = false;
+          _fixedStops = [];
+          _currentStopIndex = -1;
+          _fullRoutePolyline = [];
+          _fullRouteCumulativeDistances = [];
+          _fullRouteDurationSeconds = 0;
+          _passedStopTimes = {};
+          // Clear cached stops so they regenerate
+          SharedPreferences.getInstance().then((prefs) {
+            prefs.remove('fixed_stops_${widget.booking.bookingId}');
+            prefs.remove('stop_index_${widget.booking.bookingId}');
+            prefs.remove('passed_stop_times_${widget.booking.bookingId}');
+          });
+
+          await _setupMarkersAndPolylines();
+        } else {
+          // Silent update — just move vehicle marker, update ETA & passed stops
+          _buildMarkers();
+
+          // Update driver location timestamp for route start recalculation
+          if (driverLoc.updatedAt != null && driverLoc.updatedAt!.isNotEmpty) {
+            try {
+              _routeStartTime = DateTime.parse(driverLoc.updatedAt!);
+            } catch (_) {}
+          }
+
+          // Check if driver reached the next stop (sequential progression)
+          if (_currentLatLng != null) _updateProgress(_currentLatLng!);
+          setState(() => _isLoadingRoute = false);
+        }
+
+        // Smoothly re-fit maps without flicker
         _fitSmallMapToAllMarkers();
         _fitExpandedMapToAllMarkers();
       }
@@ -206,28 +275,25 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       setState(() {
         _lastRefreshedAt = DateTime.now();
       });
-    } catch (e) {
-      debugPrint('Error refreshing tracking data: $e');
-      if (mounted) {
-        AppSnackbar.error(extractErrorMessage(e));
-      }
     } finally {
-      setState(() => _isRefreshing = false);
+      if (mounted) setState(() => _isRefreshing = false);
     }
   }
 
   Future<void> _loadCustomMarkers() async {
     // Small map markers (smaller size for compact view)
-    _smallTruckMarker =
-        await CustomMarkerHelper.getTruckMarkerFromAsset(size: 30);
+    _smallTruckMarker = await CustomMarkerHelper.getTruckMarkerFromAsset(
+      size: 30,
+    );
     _smallPickupMarker =
         await CustomMarkerHelper.getStartLocationMarkerFromAsset(size: 26);
     _smallDestinationMarker =
         await CustomMarkerHelper.getDropLocationMarkerFromAsset(size: 26);
 
     // Expanded map markers (bigger size for full screen view)
-    _expandedTruckMarker =
-        await CustomMarkerHelper.getTruckMarkerFromAsset(size: 60);
+    _expandedTruckMarker = await CustomMarkerHelper.getTruckMarkerFromAsset(
+      size: 60,
+    );
     _expandedPickupMarker =
         await CustomMarkerHelper.getStartLocationMarkerFromAsset(size: 30);
     _expandedDestinationMarker =
@@ -235,31 +301,33 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   }
 
   Future<void> _setupMarkersAndPolylines() async {
-    final pickup = _booking.pickup;
-    final currentLoc = _booking.currentLocation;
-    final destination = _booking.destination;
+    if (_trackingData == null) return;
+
+    final pickup = _trackingData!.pickup;
+    final driverLoc = _trackingData!.driverLocation;
+    final destination = _trackingData!.drop;
 
     Set<Polyline> polylines = {};
 
     /// -------- Get Pickup Coordinates --------
-    if (pickup?.lat != null && pickup?.lng != null) {
-      _pickupLatLng = LatLng(pickup!.lat!, pickup.lng!);
-    } else if (pickup?.locationName != null) {
-      _pickupLatLng =
-          await GoogleMapsService.geocodeAddress(pickup!.locationName!);
+    if (pickup.lat != 0 && pickup.lng != 0) {
+      _pickupLatLng = LatLng(pickup.lat, pickup.lng);
+    } else if (pickup.name.isNotEmpty) {
+      _pickupLatLng = await GoogleMapsService.geocodeAddress(pickup.name);
     }
 
     /// -------- Get Current Location Coordinates --------
-    if (currentLoc?.lat != null && currentLoc?.lng != null) {
-      _currentLatLng = LatLng(currentLoc!.lat!, currentLoc.lng!);
+    if (driverLoc.lat != 0 && driverLoc.lng != 0) {
+      _currentLatLng = LatLng(driverLoc.lat, driverLoc.lng);
     }
 
     /// -------- Get Destination Coordinates --------
-    if (destination?.lat != null && destination?.lng != null) {
-      _destinationLatLng = LatLng(destination!.lat!, destination.lng!);
-    } else if (destination?.locationName != null) {
-      _destinationLatLng =
-          await GoogleMapsService.geocodeAddress(destination!.locationName!);
+    if (destination.lat != 0 && destination.lng != 0) {
+      _destinationLatLng = LatLng(destination.lat, destination.lng);
+    } else if (destination.name.isNotEmpty) {
+      _destinationLatLng = await GoogleMapsService.geocodeAddress(
+        destination.name,
+      );
     }
 
     // Build markers for both small and expanded views
@@ -267,97 +335,178 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
     /// -------- Route + Intermediate Stops using single Directions API call --------
     if (_pickupLatLng != null && _destinationLatLng != null) {
-      // Convert route waypoints (intermediate drops) to LatLng for multi-drop routing
-      final waypoints = _booking.routeWaypoints
+      // Separate waypoints into delivered (completed) and remaining (pending/in-progress)
+      // Sorted by priority so polyline follows the intended delivery order
+      final allWaypoints = _trackingData!.routeWaypoints
           .where((wp) => wp.lat != 0 && wp.lng != 0)
+          .toList()
+        ..sort((a, b) => a.priority.compareTo(b.priority));
+      final remainingWaypoints = allWaypoints
+          .where((wp) => !wp.isCompleted)
           .map((wp) => LatLng(wp.lat, wp.lng))
           .toList();
 
+      // When driver position is available, calculate route from DRIVER → remaining stops → destination.
+      // This gives accurate ETA because it uses the actual road from where the driver IS,
+      // not the shortest path from pickup which may be a completely different road.
+      // Example: Chennai → Vijayawada(delivered) → Amalapuram
+      //   Old: origin=Chennai, waypoints=[], dest=Amalapuram → shortest direct route (WRONG)
+      //   New: origin=DriverPos(near Vijayawada), waypoints=[], dest=Amalapuram → actual road (CORRECT)
+      final routeOrigin = _currentLatLng ?? _pickupLatLng!;
+      final useDriverAsOrigin = _currentLatLng != null;
+
+      debugPrint(
+        '🗺️ Route params: origin=$routeOrigin (driver=$useDriverAsOrigin), '
+        'dest=$_destinationLatLng, remainingWaypoints=${remainingWaypoints.length}, '
+        'totalWaypoints=${allWaypoints.length}',
+      );
+
       final routeData = await GoogleMapsService.getRouteWithStops(
-        origin: _pickupLatLng!,
+        origin: routeOrigin,
         destination: _destinationLatLng!,
-        driverPosition: _currentLatLng,
-        routeWaypoints: waypoints,
+        driverPosition: useDriverAsOrigin ? null : _currentLatLng,
+        routeWaypoints: remainingWaypoints,
       );
 
       if (routeData.isNotEmpty) {
-        final polylinePoints =
-            routeData['polyline_points'] as List<LatLng>? ?? [];
-        final completedPoints =
-            routeData['completed_points'] as List<LatLng>? ?? [];
-        final remainingPointsList =
+        final remainingPointsRoute =
             routeData['remaining_points'] as List<LatLng>? ?? [];
+        final completedFromApi =
+            routeData['completed_points'] as List<LatLng>? ?? [];
         _routeStops = routeData['stops'] as List<Map<String, dynamic>>? ?? [];
         _totalRouteDurationSeconds =
             routeData['total_duration_seconds'] as int? ?? 0;
-        _fullPolyline = polylinePoints;
-        _cumulativeDistances = (routeData['cumulative_distances'] as List?)
-                ?.cast<double>() ??
-            [];
+        _fullPolyline = routeData['polyline_points'] as List<LatLng>? ?? [];
+        _cumulativeDistances =
+            (routeData['cumulative_distances'] as List?)?.cast<double>() ?? [];
 
-        final driverFraction =
-            routeData['driver_progress_fraction'] as double? ?? 0.0;
         final remainingSeconds =
             routeData['remaining_duration_seconds'] as int? ?? 0;
 
-        _estimatedDuration = _formatDuration(remainingSeconds);
+        if (useDriverAsOrigin) {
+          // Route was calculated from driver → destination, so the ENTIRE
+          // route duration IS the remaining ETA (no fraction math needed)
+          _estimatedDuration = _formatDuration(_totalRouteDurationSeconds);
 
-        // Calculate estimated route start time from driver's last update
-        if (_currentLatLng != null &&
-            currentLoc?.updatedAt != null &&
-            currentLoc!.updatedAt!.isNotEmpty) {
-          try {
-            final updatedAt = DateTime.parse(currentLoc.updatedAt!);
-            final elapsedSeconds =
-                (driverFraction * _totalRouteDurationSeconds).round();
-            _routeStartTime =
-                updatedAt.subtract(Duration(seconds: elapsedSeconds));
-          } catch (_) {}
-        }
+          // Route start time = driver's last update (journey is "starting" from driver)
+          final driverLoc = _trackingData!.driverLocation;
+          if (driverLoc.updatedAt != null && driverLoc.updatedAt!.isNotEmpty) {
+            try {
+              _routeStartTime = DateTime.parse(driverLoc.updatedAt!);
+            } catch (_) {}
+          }
 
-        if (polylinePoints.isNotEmpty) {
-          if (_currentLatLng != null && completedPoints.isNotEmpty) {
-            // Green solid line: pickup to driver position (completed)
-            polylines.add(
-              Polyline(
-                polylineId: const PolylineId('completed'),
-                points: completedPoints,
-                color: Colors.green,
-                width: 5,
-              ),
-            );
-            // Blue dashed line: driver position to destination (remaining)
-            if (remainingPointsList.isNotEmpty) {
-              polylines.add(
-                Polyline(
-                  polylineId: const PolylineId('remaining'),
-                  points: remainingPointsList,
-                  color: const Color(0xFF0077C8),
-                  width: 5,
-                  patterns: [
-                    PatternItem.dash(20),
-                    PatternItem.gap(10),
-                  ],
-                ),
-              );
+          // Green solid line: pickup → driver (road-following via timeline GPS points)
+          List<LatLng> completedRoute = [];
+
+          // Collect timeline GPS points for the traveled path
+          final timelineCoords = <LatLng>[];
+          for (final item in _trackingData!.timeline) {
+            if (item.lat != null && item.lng != null) {
+              timelineCoords.add(LatLng(item.lat!, item.lng!));
             }
-          } else {
-            // No current location — full route as dashed blue
-            polylines.add(
-              Polyline(
-                polylineId: const PolylineId('full_route'),
-                points: remainingPointsList.isNotEmpty
-                    ? remainingPointsList
-                    : polylinePoints,
-                color: const Color(0xFF0077C8),
-                width: 5,
-                patterns: [
-                  PatternItem.dash(20),
-                  PatternItem.gap(10),
-                ],
-              ),
+          }
+
+          if (timelineCoords.isNotEmpty) {
+            // Sample max 10 evenly spaced points as via waypoints
+            const maxPoints = 10;
+            List<LatLng> viaPoints;
+            if (timelineCoords.length <= maxPoints) {
+              viaPoints = timelineCoords;
+            } else {
+              viaPoints = [];
+              final step = timelineCoords.length / maxPoints;
+              for (int i = 0; i < maxPoints; i++) {
+                viaPoints.add(timelineCoords[(i * step).floor()]);
+              }
+              viaPoints[viaPoints.length - 1] = timelineCoords.last;
+            }
+
+            // Get road-snapped route using via waypoints
+            completedRoute = await GoogleMapsService.getDirections(
+              origin: _pickupLatLng!,
+              destination: _currentLatLng!,
+              waypoints: viaPoints,
+              useViaWaypoints: true,
             );
           }
+
+          // Fallback: direct road route without timeline
+          if (completedRoute.isEmpty) {
+            completedRoute = await GoogleMapsService.getDirections(
+              origin: _pickupLatLng!,
+              destination: _currentLatLng!,
+            );
+          }
+
+          // Final fallback: straight line
+          if (completedRoute.isEmpty) {
+            completedRoute = [_pickupLatLng!, _currentLatLng!];
+          }
+
+          polylines.add(
+            Polyline(
+              polylineId: const PolylineId('completed'),
+              points: completedRoute,
+              color: Colors.green,
+              width: 5,
+              patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+            ),
+          );
+          // Remaining route: split into forward (blue) + return (yellow)
+          // Forward = driver → last waypoint, Return = last waypoint → destination
+          final allRoutePoints = [...completedFromApi, ...remainingPointsRoute];
+          if (allRoutePoints.isNotEmpty) {
+            _addSplitPolylines(polylines, allRoutePoints, remainingWaypoints);
+          }
+        } else if (_currentLatLng != null && completedFromApi.isNotEmpty) {
+          // Fallback: route from pickup with driver as waypoint (original logic)
+          final driverFraction =
+              routeData['driver_progress_fraction'] as double? ?? 0.0;
+          _estimatedDuration = _formatDuration(remainingSeconds);
+
+          final driverLoc = _trackingData!.driverLocation;
+          if (driverLoc.updatedAt != null && driverLoc.updatedAt!.isNotEmpty) {
+            try {
+              final updatedAt = DateTime.parse(driverLoc.updatedAt!);
+              final elapsedSeconds =
+                  (driverFraction * _totalRouteDurationSeconds).round();
+              _routeStartTime = updatedAt.subtract(
+                Duration(seconds: elapsedSeconds),
+              );
+            } catch (_) {}
+          }
+
+          // Green solid line: pickup to driver position (completed)
+          polylines.add(
+            Polyline(
+              polylineId: const PolylineId('completed'),
+              points: completedFromApi,
+              color: Colors.green,
+              width: 5,
+              patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+            ),
+          );
+          // Remaining: split into forward (blue) + return (yellow)
+          if (remainingPointsRoute.isNotEmpty) {
+            _addSplitPolylines(
+              polylines,
+              remainingPointsRoute,
+              remainingWaypoints,
+            );
+          }
+        } else if (remainingPointsRoute.isNotEmpty) {
+          _estimatedDuration = _formatDuration(remainingSeconds);
+          // No current location — full route as dashed blue
+          polylines.add(
+            Polyline(
+              polylineId: const PolylineId('full_route'),
+              points: remainingPointsRoute,
+              color: const Color(0xFF0077C8),
+              width: 5,
+              patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+            ),
+          );
         }
       } else {
         // Fallback: straight lines if Directions API fails
@@ -376,10 +525,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
               points: [_currentLatLng!, _destinationLatLng!],
               color: const Color(0xFF0077C8),
               width: 4,
-              patterns: [
-                PatternItem.dash(20),
-                PatternItem.gap(10),
-              ],
+              patterns: [PatternItem.dash(20), PatternItem.gap(10)],
             ),
           );
         } else {
@@ -402,98 +548,167 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       _polylines = polylines;
       _isLoadingRoute = false;
     });
+
+    // ── FIXED TIMELINE: generate once, persist, only update progress ──
+    if (!_fixedStopsGenerated && _pickupLatLng != null && _destinationLatLng != null) {
+      final loaded = await _loadFixedStops();
+      if (loaded) {
+        // Stops from cache — still need full route polyline for time/sub-stops
+        await _fetchFullRoutePolyline();
+      } else {
+        // No cache — generate stops from full route and persist
+        await _fetchFullRouteAndGenerateFixedStops();
+        await _saveFixedStops();
+      }
+      await _loadCurrentStopIndex();
+      _fixedStopsGenerated = true;
+    }
+    // Check if driver reached the next stop
+    if (_currentLatLng != null) _updateProgress(_currentLatLng!);
+  }
+
+  double _getBearing(LatLng start, LatLng end) {
+    double lat1 = start.latitude * pi / 180;
+    double lon1 = start.longitude * pi / 180;
+    double lat2 = end.latitude * pi / 180;
+    double lon2 = end.longitude * pi / 180;
+
+    double dLon = lon2 - lon1;
+
+    double y = sin(dLon) * cos(lat2);
+    double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon);
+
+    double bearing = atan2(y, x);
+    return (bearing * 180 / pi + 360) % 360;
+  }
+
+  int _getClosestPolylineIndex(LatLng current) {
+    double minDist = double.infinity;
+    int index = 0;
+
+    for (int i = 0; i < _fullPolyline.length; i++) {
+      final d =
+          (_fullPolyline[i].latitude - current.latitude).abs() +
+          (_fullPolyline[i].longitude - current.longitude).abs();
+
+      if (d < minDist) {
+        minDist = d;
+        index = i;
+      }
+    }
+
+    return index;
+  }
+
+  double _getRouteBearing(LatLng current) {
+    if (_fullPolyline.length < 2) return 0;
+
+    int index = _getClosestPolylineIndex(current);
+
+    // prevent overflow
+    if (index >= _fullPolyline.length - 1) {
+      index = _fullPolyline.length - 2;
+    }
+
+    final start = _fullPolyline[index];
+    final end = _fullPolyline[index + 1];
+
+    return _getBearing(start, end);
   }
 
   /// Build markers for both small and expanded map views
   void _buildMarkers() {
-    final pickup = _booking.pickup;
-    final currentLoc = _booking.currentLocation;
-    final destination = _booking.destination;
+    if (_trackingData == null) return;
+
+    final pickup = _trackingData!.pickup;
+    final driverLoc = _trackingData!.driverLocation;
+    final destination = _trackingData!.drop;
 
     Set<Marker> smallMarkers = {};
     Set<Marker> expandedMarkers = {};
 
-    /// -------- Pickup Markers --------
+    /// -------- Pickup --------
     if (_pickupLatLng != null) {
       smallMarkers.add(
         Marker(
           markerId: const MarkerId('pickup'),
           position: _pickupLatLng!,
-          icon: _smallPickupMarker ??
+          icon:
+              _smallPickupMarker ??
               BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-          infoWindow: InfoWindow(
-            title: 'Pickup',
-            snippet: pickup?.locationName,
-          ),
+          infoWindow: InfoWindow(title: 'Pickup', snippet: pickup.name),
         ),
       );
+
       expandedMarkers.add(
         Marker(
           markerId: const MarkerId('pickup'),
           position: _pickupLatLng!,
-          icon: _expandedPickupMarker ??
+          icon:
+              _expandedPickupMarker ??
               BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-          infoWindow: InfoWindow(
-            title: 'Pickup',
-            snippet: pickup?.locationName,
-          ),
+          infoWindow: InfoWindow(title: 'Pickup', snippet: pickup.name),
         ),
       );
     }
 
-    /// -------- Current/Truck Markers --------
+    /// -------- Vehicle (ONLY ONCE) --------
     if (_currentLatLng != null) {
+      final rotationAngle = _fullPolyline.isNotEmpty
+          ? _getRouteBearing(_currentLatLng!)
+          : 0.0;
+
       smallMarkers.add(
         Marker(
           markerId: const MarkerId('vehicle'),
           position: _currentLatLng!,
-          icon: _smallTruckMarker ??
-              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-          infoWindow: InfoWindow(
-            title: 'Vehicle Location',
-            snippet: currentLoc?.locationName ?? 'Current Position',
-          ),
+          icon: _smallTruckMarker!,
           anchor: const Offset(0.5, 0.5),
+          rotation: rotationAngle,
+          flat: true,
+          infoWindow: InfoWindow(title: 'Vehicle', snippet: driverLoc.name),
         ),
       );
+
       expandedMarkers.add(
         Marker(
           markerId: const MarkerId('vehicle'),
           position: _currentLatLng!,
-          icon: _expandedTruckMarker ??
-              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-          infoWindow: InfoWindow(
-            title: 'Vehicle Location',
-            snippet: currentLoc?.locationName ?? 'Current Position',
-          ),
+          icon: _expandedTruckMarker!,
           anchor: const Offset(0.5, 0.5),
+          rotation: rotationAngle,
+          flat: true,
+          infoWindow: InfoWindow(title: 'Vehicle', snippet: driverLoc.name),
         ),
       );
     }
 
-    /// -------- Destination Markers --------
+    /// -------- Destination --------
     if (_destinationLatLng != null) {
       smallMarkers.add(
         Marker(
           markerId: const MarkerId('destination'),
           position: _destinationLatLng!,
-          icon: _smallDestinationMarker ??
+          icon:
+              _smallDestinationMarker ??
               BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
           infoWindow: InfoWindow(
             title: 'Destination',
-            snippet: destination?.locationName,
+            snippet: destination.name,
           ),
         ),
       );
+
       expandedMarkers.add(
         Marker(
           markerId: const MarkerId('destination'),
           position: _destinationLatLng!,
-          icon: _expandedDestinationMarker ??
+          icon:
+              _expandedDestinationMarker ??
               BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
           infoWindow: InfoWindow(
             title: 'Destination',
-            snippet: destination?.locationName,
+            snippet: destination.name,
           ),
         ),
       );
@@ -514,10 +729,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     if (points.isEmpty) return;
 
     if (points.length == 1) {
-      _initialPosition = CameraPosition(
-        target: points.first,
-        zoom: 14.0,
-      );
+      _initialPosition = CameraPosition(target: points.first, zoom: 14.0);
       return;
     }
 
@@ -572,71 +784,212 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     final width = MediaQuery.of(context).size.width;
     final height = MediaQuery.of(context).size.height;
 
-    return PopScope(
-      canPop: !_isMapExpanded,
-      onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _isMapExpanded) {
-          setState(() {
-            _isMapExpanded = false;
-          });
-        }
-      },
-      child: Scaffold(
-        backgroundColor: Colors.white,
-        body: SafeArea(
-          child: Column(
-            children: [
-              /// ================= Header =================
-              _buildHeader(context, width, height),
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: SafeArea(
+        child: Column(
+          children: [
+            /// ================= Header =================
+            _buildHeader(context, width, height),
 
-              /// ================= Content =================
-              Expanded(
-                child: _isMapExpanded
-                    ? _buildExpandedMapView(width, height)
-                    : _buildDefaultView(width, height),
-              ),
-            ],
-          ),
+            /// ================= Content =================
+            Expanded(
+              child: _isLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _trackingData == null
+                      ? const Center(child: Text("No tracking data found"))
+                      : _isMapExpanded
+                          ? _buildExpandedMapView(width, height)
+                          : _buildDefaultView(width, height),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  /// Default view with small map + details + timeline + refresh bar
+  /// Default view: Map fills top, draggable bottom sheet with details
   Widget _buildDefaultView(double width, double height) {
-    return Column(
+    return Stack(
       children: [
-        Expanded(
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                /// Map Section (clickable to expand)
-                _buildSmallMapSection(width, height),
+        /// ── Map fills entire background ──
+        Column(
+          children: [Expanded(child: _buildSmallMapSection(width, height))],
+        ),
 
-                /// Content Section
-                Padding(
-                  padding: EdgeInsets.all(width * 0.05),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildDriverDetails(width, height),
-                      SizedBox(height: height * 0.025),
-                      _buildVehicleStatus(width, height),
-                      SizedBox(height: height * 0.01),
-                      _buildDeliveryInfo(width, height),
-                      SizedBox(height: height * 0.025),
-                      _buildLocationTimeline(width, height),
-                    ],
-                  ),
+        /// ── Floating ETA pill on map ──
+        if (_estimatedDuration.isNotEmpty)
+          Positioned(
+            top: height * 0.015,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: width * 0.05,
+                  vertical: width * 0.025,
                 ),
-              ],
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(30),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.12),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: const BoxDecoration(
+                        color: Colors.green,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    SizedBox(width: width * 0.02),
+                    Text(
+                      'Arriving in ',
+                      style: TextStyle(
+                        fontSize: width * 0.033,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                    Text(
+                      _estimatedDuration,
+                      style: TextStyle(
+                        fontSize: width * 0.038,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black87,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+        /// ── Expand map button ──
+        Positioned(
+          top: height * 0.015,
+          right: width * 0.04,
+          child: GestureDetector(
+            onTap: () => setState(() => _isMapExpanded = true),
+            child: Container(
+              padding: EdgeInsets.all(width * 0.025),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.12),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Icon(
+                Icons.fullscreen,
+                size: width * 0.05,
+                color: Colors.black87,
+              ),
             ),
           ),
         ),
 
-        /// Bottom refresh bar
-        _buildRefreshBar(width, height),
+        /// ── Draggable Bottom Sheet ──
+        DraggableScrollableSheet(
+          initialChildSize: 0.42,
+          minChildSize: 0.15,
+          maxChildSize: 0.85,
+          builder: (context, scrollController) {
+            return Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(24),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.1),
+                    blurRadius: 20,
+                    offset: const Offset(0, -5),
+                  ),
+                ],
+              ),
+              child: ListView(
+                controller: scrollController,
+                padding: EdgeInsets.zero,
+                children: [
+                  /// Drag handle
+                  Center(
+                    child: Container(
+                      margin: EdgeInsets.only(
+                        top: height * 0.012,
+                        bottom: height * 0.01,
+                      ),
+                      width: width * 0.1,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+
+                  /// Live status bar
+                  _buildLiveStatusBar(width, height),
+
+                  /// Driver card
+                  Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: width * 0.04,
+                      vertical: height * 0.008,
+                    ),
+                    child: _buildDriverCard(width, height),
+                  ),
+
+                  /// Vehicle status + delivery info
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: width * 0.04),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildVehicleStatus(width, height),
+                        SizedBox(height: height * 0.008),
+                        _buildDeliveryInfo(width, height),
+                        SizedBox(height: height * 0.012),
+                        _buildTravelCostRow(width),
+                      ],
+                    ),
+                  ),
+
+                  /// Divider
+                  Padding(
+                    padding: EdgeInsets.symmetric(vertical: height * 0.012),
+                    child: Divider(
+                      color: Colors.grey.shade200,
+                      thickness: 6,
+                      height: 0,
+                    ),
+                  ),
+
+                  /// Timeline
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: width * 0.04),
+                    child: _buildLocationTimeline(width, height),
+                  ),
+
+                  SizedBox(height: height * 0.03),
+                ],
+              ),
+            );
+          },
+        ),
       ],
     );
   }
@@ -651,8 +1004,12 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   }
 
   Widget _buildRefreshBar(double width, double height) {
-    final currentLoc = _booking.currentLocation;
-    final locationName = currentLoc?.locationName ?? 'Location not available';
+    if (_trackingData == null) return const SizedBox.shrink();
+
+    final driverLoc = _trackingData!.driverLocation;
+    final locationName = driverLoc.name.isNotEmpty
+        ? driverLoc.name
+        : 'Location not available';
 
     return Container(
       padding: EdgeInsets.symmetric(
@@ -661,9 +1018,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       ),
       decoration: BoxDecoration(
         color: const Color(0xFFF5F5F5),
-        border: Border(
-          top: BorderSide(color: Colors.grey.shade300, width: 1),
-        ),
+        border: Border(top: BorderSide(color: Colors.grey.shade300, width: 1)),
       ),
       child: Row(
         children: [
@@ -682,7 +1037,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 2),
+                SizedBox(height: 2),
                 Text(
                   _timeAgoText(),
                   style: TextStyle(
@@ -699,8 +1054,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             child: Container(
               width: width * 0.12,
               height: width * 0.12,
-              decoration: const BoxDecoration(
-                color: Color(0xFF0077C8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0077C8),
                 shape: BoxShape.circle,
               ),
               child: _isRefreshing
@@ -737,19 +1092,17 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           myLocationButtonEnabled: false,
           zoomControlsEnabled: true,
           mapToolbarEnabled: true,
-          gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
-            Factory<OneSequenceGestureRecognizer>(
-              () => EagerGestureRecognizer(),
-            ),
-          },
+          scrollGesturesEnabled: true,
+          zoomGesturesEnabled: true,
+          rotateGesturesEnabled: true,
+          tiltGesturesEnabled: true,
           padding: EdgeInsets.only(
-            bottom: height * 0.16, // space for Last Update card
+            bottom: height * 0.16,
             right: width * 0.02,
             top: height * 0.02,
           ),
           onMapCreated: (GoogleMapController controller) {
             _expandedMapController = controller;
-            // Fit to show all markers after map is created
             Future.delayed(const Duration(milliseconds: 300), () {
               _fitExpandedMapToAllMarkers();
             });
@@ -759,9 +1112,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         // Loading indicator for route
         if (_isLoadingRoute)
           const Center(
-            child: CircularProgressIndicator(
-              color: Color(0xFF0077C8),
-            ),
+            child: CircularProgressIndicator(color: Color(0xFF0077C8)),
           ),
 
         // Center on vehicle button
@@ -839,12 +1190,16 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       _expandedMapController!.animateCamera(
         CameraUpdate.newLatLngBounds(
           LatLngBounds(
-            southwest:
-                LatLng(minLat - actualLatPadding, minLng - actualLngPadding),
-            northeast:
-                LatLng(maxLat + actualLatPadding, maxLng + actualLngPadding),
+            southwest: LatLng(
+              minLat - actualLatPadding,
+              minLng - actualLngPadding,
+            ),
+            northeast: LatLng(
+              maxLat + actualLatPadding,
+              maxLng + actualLngPadding,
+            ),
           ),
-          60, // Padding in pixels
+          60,
         ),
       );
     } catch (e) {
@@ -888,12 +1243,16 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       _smallMapController!.animateCamera(
         CameraUpdate.newLatLngBounds(
           LatLngBounds(
-            southwest:
-                LatLng(minLat - actualLatPadding, minLng - actualLngPadding),
-            northeast:
-                LatLng(maxLat + actualLatPadding, maxLng + actualLngPadding),
+            southwest: LatLng(
+              minLat - actualLatPadding,
+              minLng - actualLngPadding,
+            ),
+            northeast: LatLng(
+              maxLat + actualLatPadding,
+              maxLng + actualLngPadding,
+            ),
           ),
-          40, // Less padding for small map
+          40,
         ),
       );
     } catch (e) {
@@ -904,144 +1263,330 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   Widget _buildHeader(BuildContext context, double width, double height) {
     return Container(
       padding: EdgeInsets.symmetric(
-        horizontal: width * 0.05,
-        vertical: height * 0.02,
+        horizontal: width * 0.04,
+        vertical: height * 0.012,
       ),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border(
-          bottom: BorderSide(
-            color: Colors.grey.shade200,
-            width: 1,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
           ),
-        ),
+        ],
       ),
       child: Row(
         children: [
           GestureDetector(
             onTap: () {
               if (_isMapExpanded) {
-                setState(() {
-                  _isMapExpanded = false;
-                });
+                setState(() => _isMapExpanded = false);
               } else {
                 Navigator.pop(context);
               }
             },
-            child: Icon(
-              Icons.arrow_back,
-              size: width * 0.06,
-              color: Colors.black,
+            child: Container(
+              padding: EdgeInsets.all(width * 0.02),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.arrow_back_ios_new,
+                size: width * 0.04,
+                color: Colors.black87,
+              ),
             ),
           ),
-          SizedBox(width: width * 0.04),
-          Text(
-            'Vehicle tracking',
-            style: TextStyle(
-              fontSize: width * 0.048,
-              fontWeight: FontWeight.bold,
-            ),
+          SizedBox(width: width * 0.03),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Vehicle tracking',
+                style: TextStyle(
+                  fontSize: width * 0.045,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black87,
+                ),
+              ),
+              Text(
+                'Order #${widget.booking.bookingId}',
+                style: TextStyle(
+                  fontSize: width * 0.03,
+                  color: Colors.grey.shade500,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
           ),
-          Spacer(),
-          RefreshButton(onTap: () {
-            _refreshData();
-          }),
+          const Spacer(),
+          RefreshButton(onTap: _refreshData),
         ],
       ),
     );
   }
 
   Widget _buildSmallMapSection(double width, double height) {
+    return Stack(
+      children: [
+        GoogleMap(
+          mapType: MapType.normal,
+          initialCameraPosition: _initialPosition,
+          markers: _smallMapMarkers,
+          polylines: _polylines,
+          myLocationEnabled: false,
+          myLocationButtonEnabled: false,
+          zoomControlsEnabled: false,
+          mapToolbarEnabled: false,
+          scrollGesturesEnabled: true,
+          zoomGesturesEnabled: true,
+          rotateGesturesEnabled: true,
+          tiltGesturesEnabled: true,
+          padding: EdgeInsets.only(bottom: height * 0.15),
+          onMapCreated: (GoogleMapController controller) {
+            _smallMapController = controller;
+            Future.delayed(const Duration(milliseconds: 300), () {
+              _fitSmallMapToAllMarkers();
+            });
+          },
+        ),
+        if (_isLoadingRoute)
+          Container(
+            color: Colors.white.withValues(alpha: 0.5),
+            child: const Center(
+              child: CircularProgressIndicator(color: Color(0xFF0077C8)),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Live status bar with pulsing dot and location
+  Widget _buildLiveStatusBar(double width, double height) {
+    if (_trackingData == null) return const SizedBox.shrink();
+
+    final driverLoc = _trackingData!.driverLocation;
+    final locationName = driverLoc.name.isNotEmpty
+        ? driverLoc.name
+        : 'Tracking...';
+
     return Container(
-      height: height * 0.22,
-      margin: EdgeInsets.all(width * 0.04),
+      margin: EdgeInsets.symmetric(
+        horizontal: width * 0.04,
+        vertical: height * 0.005,
+      ),
+      padding: EdgeInsets.symmetric(
+        horizontal: width * 0.04,
+        vertical: width * 0.03,
+      ),
       decoration: BoxDecoration(
+        color: Colors.green.shade50,
         borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.green.shade100),
+      ),
+      child: Row(
+        children: [
+          // Pulsing live dot
+          SizedBox(
+            width: 12,
+            height: 12,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                AnimatedBuilder(
+                  animation: _pulseAnimation,
+                  builder: (context, child) {
+                    return Container(
+                      width: 12 * _pulseAnimation.value * 0.6,
+                      height: 12 * _pulseAnimation.value * 0.6,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.green.withValues(
+                          alpha:
+                              (1.0 - (_pulseAnimation.value - 1.0) / 1.5) * 0.3,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: const BoxDecoration(
+                    color: Colors.green,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(width: width * 0.03),
+          Text(
+            'LIVE',
+            style: TextStyle(
+              fontSize: width * 0.028,
+              fontWeight: FontWeight.w800,
+              color: Colors.green.shade700,
+              letterSpacing: 1.2,
+            ),
+          ),
+          SizedBox(width: width * 0.03),
+          Expanded(
+            child: Text(
+              locationName,
+              style: TextStyle(
+                fontSize: width * 0.033,
+                color: Colors.green.shade800,
+                fontWeight: FontWeight.w500,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Text(
+            _timeAgoText(),
+            style: TextStyle(
+              fontSize: width * 0.028,
+              color: Colors.green.shade600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Modern driver card with avatar, info, and call button
+  Widget _buildDriverCard(double width, double height) {
+    if (_trackingData == null) return const SizedBox.shrink();
+
+    final driver = _trackingData!.driverDetails;
+    final driverName = driver.driverName.isNotEmpty
+        ? driver.driverName
+        : 'Not assigned';
+    final vehicleNumber = driver.vehicleNumber.isNotEmpty
+        ? driver.vehicleNumber
+        : 'N/A';
+    final driverPhone = driver.driverPhone;
+
+    return Container(
+      padding: EdgeInsets.all(width * 0.035),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.1),
-            blurRadius: 10,
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
             offset: const Offset(0, 2),
           ),
         ],
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: Stack(
-          children: [
-            GoogleMap(
-              mapType: MapType.normal,
-              initialCameraPosition: _initialPosition,
-              markers: _smallMapMarkers,
-              polylines: _polylines,
-              myLocationEnabled: false,
-              myLocationButtonEnabled: false,
-              zoomControlsEnabled: true,
-              mapToolbarEnabled: true,
-              scrollGesturesEnabled: true,
-              zoomGesturesEnabled: true,
-              rotateGesturesEnabled: true,
-              tiltGesturesEnabled: true,
-              gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
-                Factory<OneSequenceGestureRecognizer>(
-                  () => EagerGestureRecognizer(),
-                ),
-              },
-              onMapCreated: (GoogleMapController controller) {
-                _smallMapController = controller;
-                // Fit to show all markers after map is created
-                Future.delayed(const Duration(milliseconds: 300), () {
-                  _fitSmallMapToAllMarkers();
-                });
-              },
+      child: Row(
+        children: [
+          // Driver avatar
+          Container(
+            width: width * 0.13,
+            height: width * 0.13,
+            decoration: BoxDecoration(
+              color: const Color(0xFF0077C8).withValues(alpha: 0.1),
+              shape: BoxShape.circle,
             ),
-            // Loading overlay
-            if (_isLoadingRoute)
-              Container(
-                color: Colors.white.withValues(alpha: 0.7),
-                child: const Center(
-                  child: CircularProgressIndicator(
-                    color: Color(0xFF0077C8),
+            child: driver.driverImage.isNotEmpty
+                ? ClipOval(
+                    child: Image.network(
+                      driver.driverImage,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Icon(
+                        Icons.person,
+                        size: width * 0.07,
+                        color: const Color(0xFF0077C8),
+                      ),
+                    ),
+                  )
+                : Icon(
+                    Icons.person,
+                    size: width * 0.07,
+                    color: const Color(0xFF0077C8),
                   ),
+          ),
+          SizedBox(width: width * 0.035),
+          // Driver info
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  driverName,
+                  style: TextStyle(
+                    fontSize: width * 0.04,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.black87,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.local_shipping_outlined,
+                      size: width * 0.035,
+                      color: Colors.grey.shade500,
+                    ),
+                    SizedBox(width: width * 0.015),
+                    Text(
+                      vehicleNumber,
+                      style: TextStyle(
+                        fontSize: width * 0.033,
+                        color: Colors.grey.shade600,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          // Call button
+          if (driverPhone.isNotEmpty)
+            GestureDetector(
+              onTap: () async {
+                final uri = Uri(scheme: 'tel', path: driverPhone);
+                if (await canLaunchUrl(uri)) await launchUrl(uri);
+              },
+              child: Container(
+                padding: EdgeInsets.all(width * 0.03),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.green.shade200),
+                ),
+                child: Icon(
+                  Icons.phone,
+                  size: width * 0.05,
+                  color: Colors.green.shade700,
                 ),
               ),
-            // Expand icon
-            Positioned(
-              top: width * 0.03,
-              right: width * 0.03,
-              child: GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _isMapExpanded = true;
-                  });
-                },
-                child: Container(
-                  padding: EdgeInsets.all(width * 0.02),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.fullscreen,
-                    size: width * 0.045,
-                    color: Colors.black,
-                  ),
-                ),
-              ),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }
 
   Widget _buildDriverDetails(double width, double height) {
-    final driver = _booking.driverDetails;
-    final driverName = driver.name.isNotEmpty ? driver.name : 'Not assigned';
-    final driverMobile =
-        driver.mobile.isNotEmpty ? '+91${driver.mobile}' : 'N/A';
-    final vehicleNumber =
-        driver.vehicleNumber.isNotEmpty ? driver.vehicleNumber : 'N/A';
+    if (_trackingData == null) return const SizedBox.shrink();
+
+    final driver = _trackingData!.driverDetails;
+    final driverName = driver.driverName.isNotEmpty
+        ? driver.driverName
+        : 'Not assigned';
+    final driverMobile = driver.driverPhone.isNotEmpty
+        ? '+91${driver.driverPhone}'
+        : 'N/A';
+    final vehicleNumber = driver.vehicleNumber.isNotEmpty
+        ? driver.vehicleNumber
+        : 'N/A';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1055,8 +1600,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         ),
         SizedBox(height: height * 0.015),
         Wrap(
-          spacing: width * 0.08, // horizontal spacing
-          runSpacing: height * 0.016, // vertical spacing between rows
+          spacing: width * 0.08,
+          runSpacing: height * 0.016,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             _infoItem(
@@ -1088,11 +1633,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(
-          icon,
-          size: width * 0.05,
-          color: Colors.grey.shade700,
-        ),
+        Icon(icon, size: width * 0.05, color: Colors.grey.shade700),
         SizedBox(width: width * 0.02),
         Text(
           text,
@@ -1108,108 +1649,67 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   }
 
   Widget _buildVehicleStatus(double width, double height) {
-    final status = _booking.status;
-    String statusMessage;
+    if (_trackingData == null) return const SizedBox.shrink();
 
-    if (status.isCompleted) {
-      statusMessage = 'Your delivery has been completed successfully.';
-    } else if (status.isInProgress) {
-      statusMessage = 'Your order is out for delivery.';
-    } else if (status.isDriverAssigned) {
-      statusMessage = 'Vehicle is on the way to the destination.';
-    } else if (status.isAccepted) {
-      statusMessage =
-          'Your booking has been confirmed. Vehicle will start soon.';
-    } else {
-      statusMessage =
-          'We\'ve received your booking. Within a few days, we will assign your vehicle';
-    }
+    String statusMessage =
+        _trackingData!.vehicleDescription ??
+        (_trackingData!.deliveryUpdates.note.isNotEmpty
+            ? _trackingData!.deliveryUpdates.note
+            : 'We\'ve received your booking. Within a few days, we will assign your vehicle');
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Vehicle Status',
-              style: TextStyle(
-                fontSize: width * 0.042,
-                fontWeight: FontWeight.bold,
+    return Container(
+      padding: EdgeInsets.all(width * 0.035),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.info_outline,
+                size: width * 0.04,
+                color: const Color(0xFF0077C8),
               ),
-            ),
-            if (_estimatedDuration.isNotEmpty)
-              Container(
-                padding: EdgeInsets.symmetric(
-                  horizontal: width * 0.03,
-                  vertical: width * 0.015,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF0077C8).withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Deliver in',
-                      style: TextStyle(
-                        fontSize: width * 0.03,
-                        color: const Color(0xFF0077C8),
-                      ),
-                    ),
-                    SizedBox(width: width * 0.015),
-                    Icon(
-                      Icons.access_time,
-                      size: width * 0.035,
-                      color: const Color(0xFF0077C8),
-                    ),
-                    SizedBox(width: width * 0.01),
-                    Text(
-                      _estimatedDuration,
-                      style: TextStyle(
-                        fontSize: width * 0.032,
-                        fontWeight: FontWeight.w600,
-                        color: const Color(0xFF0077C8),
-                      ),
-                    ),
-                  ],
+              SizedBox(width: width * 0.02),
+              Text(
+                'Status',
+                style: TextStyle(
+                  fontSize: width * 0.035,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black87,
                 ),
               ),
-          ],
-        ),
-        SizedBox(height: height * 0.01),
-        Text(
-          statusMessage,
-          style: TextStyle(
-            fontSize: width * 0.036,
-            color: Colors.grey.shade700,
-            height: 1.4,
+            ],
           ),
-        ),
-      ],
+          SizedBox(height: height * 0.008),
+          Text(
+            statusMessage,
+            style: TextStyle(
+              fontSize: width * 0.033,
+              color: Colors.grey.shade600,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildDeliveryInfo(double width, double height) {
+    if (_trackingData == null) return const SizedBox.shrink();
+
+    final deliveryExpected = _trackingData!.deliveryUpdates.deliveryExpected;
+    final expectedDelivery = _trackingData!.expectedDelivery;
+
     String deliveryText = '';
 
-    if (_booking.deliveryDatetime != null) {
-      try {
-        final deliveryDate = DateTime.parse(_booking.deliveryDatetime!);
-        deliveryText =
-            'Delivery Expected on ${DateFormat('dd/MM/yyyy').format(deliveryDate)}';
-      } catch (e) {
-        deliveryText = 'Delivery Expected on ${_booking.deliveryDatetime}';
-      }
-    } else if (_booking.preferredDate != null) {
-      try {
-        final preferredDate = DateTime.parse(_booking.preferredDate!);
-        deliveryText =
-            'Delivery Expected on ${DateFormat('dd/MM/yyyy').format(preferredDate)}';
-      } catch (e) {
-        deliveryText = 'Delivery Expected on ${_booking.preferredDate}';
-      }
+    if (deliveryExpected.isNotEmpty) {
+      deliveryText = 'Delivery Expected on $deliveryExpected';
+    } else if (expectedDelivery.isNotEmpty && expectedDelivery != 'N/A') {
+      deliveryText = 'Delivery Expected on $expectedDelivery';
     }
 
     if (deliveryText.isEmpty) {
@@ -1218,84 +1718,112 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
     return Text(
       deliveryText,
-      style: TextStyle(
-        fontSize: width * 0.036,
-        color: Colors.grey.shade700,
+      style: TextStyle(fontSize: width * 0.036, color: Colors.grey.shade700),
+    );
+  }
+
+  Widget _buildTravelCostRow(double width) {
+    if (_trackingData == null) return const SizedBox.shrink();
+    final travelCost = _trackingData!.travelCost;
+    final expectedDelivery = _trackingData!.expectedDelivery;
+    if (travelCost == 'N/A' &&
+        (expectedDelivery == 'N/A' || expectedDelivery.isEmpty)) {
+      return const SizedBox.shrink();
+    }
+    return Row(
+      children: [
+        if (travelCost != 'N/A')
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xffF6F6F6),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Travel cost',
+                    style: TextStyle(
+                      color: const Color(0xff374151),
+                      fontSize: width * 0.035,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    '₹$travelCost',
+                    style: TextStyle(
+                      fontSize: width * 0.035,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (travelCost != 'N/A' &&
+            expectedDelivery != 'N/A' &&
+            expectedDelivery.isNotEmpty)
+          const SizedBox(width: 8),
+        if (expectedDelivery != 'N/A' && expectedDelivery.isNotEmpty)
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xffF6F6F6),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Delivery Expected on',
+                    style: TextStyle(
+                      color: const Color(0xff374151),
+                      fontSize: width * 0.035,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    expectedDelivery,
+                    style: TextStyle(
+                      fontSize: width * 0.035,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _addSplitPolylines(
+    Set<Polyline> polylines,
+    List<LatLng> routePoints,
+    List<LatLng> waypoints,
+  ) {
+    if (routePoints.length < 2) return;
+
+    polylines.add(
+      Polyline(
+        polylineId: const PolylineId('remaining'),
+        points: routePoints,
+        color: const Color(0xFF0077C8), // blue
+        width: 5,
+        patterns: [PatternItem.dash(20), PatternItem.gap(10)],
       ),
     );
   }
 
-  /// Build the ordered list of all main timeline entries with their segment index.
-  List<Map<String, dynamic>> _buildOrderedTimelineEntries() {
-    final currentLoc = _booking.currentLocation;
-    final hasCurrentLocation =
-        currentLoc?.lat != null && currentLoc?.lng != null;
-
-    final passedStops = _routeStops.where((s) => s['passed'] == true).toList();
-    final upcomingStops = _routeStops.where((s) => s['passed'] != true).toList();
-
-    List<Map<String, dynamic>> entries = [];
-    int segIdx = 0;
-
-    // Pickup (segment 0 — no expand for pickup itself)
-    entries.add({'type': 'pickup', 'segmentIndex': segIdx});
-
-    // Passed stops
-    for (final stop in passedStops) {
-      segIdx++;
-      entries.add({'type': 'stop', 'data': stop, 'segmentIndex': segIdx, 'color': 'green'});
-    }
-
-    // Current driver location
-    if (hasCurrentLocation) {
-      segIdx++;
-      entries.add({'type': 'driver', 'segmentIndex': segIdx});
-    }
-
-    // Upcoming stops
-    for (final stop in upcomingStops) {
-      segIdx++;
-      entries.add({'type': 'stop', 'data': stop, 'segmentIndex': segIdx, 'color': 'grey'});
-    }
-
-    // Destination
-    segIdx++;
-    entries.add({'type': 'destination', 'segmentIndex': segIdx});
-
-    return entries;
-  }
-
-  /// Get the distance fraction for a given timeline entry
-  double _getFractionForEntry(Map<String, dynamic> entry) {
-    switch (entry['type']) {
-      case 'pickup':
-        return 0.0;
-      case 'destination':
-        return 1.0;
-      case 'driver':
-        if (_cumulativeDistances.isNotEmpty && _fullPolyline.isNotEmpty && _currentLatLng != null) {
-          double minDist = double.infinity;
-          int closestIdx = 0;
-          for (int i = 0; i < _fullPolyline.length; i++) {
-            final d = (_fullPolyline[i].latitude - _currentLatLng!.latitude).abs() +
-                (_fullPolyline[i].longitude - _currentLatLng!.longitude).abs();
-            if (d < minDist) {
-              minDist = d;
-              closestIdx = i;
-            }
-          }
-          return _cumulativeDistances[closestIdx] / _cumulativeDistances.last;
-        }
-        return 0.5;
-      case 'stop':
-        return (entry['data']?['distance_fraction'] as double?) ?? 0.0;
-      default:
-        return 0.0;
-    }
-  }
-
   /// Handle timeline item tap — expand/collapse sub-stops
-  void _onTimelineTap(int segmentIndex, double prevFraction, double currentFraction) async {
+  void _onTimelineTap(
+    int segmentIndex,
+    double prevFraction,
+    double currentFraction,
+  ) async {
     // Toggle if already expanded
     if (_expandedSegmentIndex == segmentIndex) {
       setState(() => _expandedSegmentIndex = null);
@@ -1334,182 +1862,622 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   }
 
   Widget _buildLocationTimeline(double width, double height) {
-    final pickup = _booking.pickup;
-    final currentLoc = _booking.currentLocation;
-    final destination = _booking.destination;
+    if (_trackingData == null) return const SizedBox.shrink();
 
-    final hasCurrentLocation =
-        currentLoc?.lat != null && currentLoc?.lng != null;
+    final pickup = _trackingData!.pickup;
+    final driverLoc = _trackingData!.driverLocation;
+    final destination = _trackingData!.drop;
 
-    final entries = _buildOrderedTimelineEntries();
+    final hasCurrentLocation = driverLoc.lat != 0 && driverLoc.lng != 0;
 
     List<Widget> timelineItems = [];
 
-    for (int i = 0; i < entries.length; i++) {
-      final entry = entries[i];
-      final isLast = i == entries.length - 1;
-      final segIdx = entry['segmentIndex'] as int;
+    /// -------- Pickup (always green, always first) --------
+    // Use journey start time for pickup, not driver's current updatedAt
+    final pickupTime = (_trackingData!.inProgressAt != null && _trackingData!.inProgressAt!.isNotEmpty)
+        ? _formatDateTime(_trackingData!.inProgressAt)
+        : _formatDateTime(driverLoc.updatedAt);
+    timelineItems.add(
+      _buildTimelineItem(
+        width,
+        height,
+        Icons.location_on,
+        Colors.green,
+        'Pickup started from',
+        pickup.name.isNotEmpty ? pickup.name : 'N/A',
+        pickupTime,
+        isFirst: true,
+        isPassed: true,
+      ),
+    );
 
-      switch (entry['type']) {
-        case 'pickup':
-          String pickupTime = '-';
-          if (_routeStartTime != null) {
-            pickupTime = _formatDateTimeObj(_routeStartTime!);
-          } else {
-            pickupTime = _formatDateTime(pickup?.vehicleStartedDate);
-          }
-
-          // Get fractions for sub-stop generation
-          final pickupNextFraction = entries.length > 1 ? _getFractionForEntry(entries[1]) : 0.0;
-          final isPickupExpanded = _expandedSegmentIndex == segIdx;
-          final isPickupLoading = _loadingSegment == segIdx;
-
-          // Pickup item FIRST
-          timelineItems.add(
-            GestureDetector(
-              onTap: () => _onTimelineTap(segIdx, 0.0, pickupNextFraction),
-              child: _buildTimelineItem(
-                width, height,
-                isPickupExpanded ? Icons.keyboard_arrow_up : Icons.location_on,
-                hasCurrentLocation ? Colors.green : Colors.grey,
-                'Pickup started from',
-                pickup?.locationName ?? _booking.hatcheryName,
-                pickupTime,
-                isFirst: true,
-              ),
-            ),
-          );
-
-          // Sub-timeline AFTER (below pickup)
-          if (isPickupExpanded || isPickupLoading) {
-            timelineItems.add(
-              _buildSubTimeline(width, height, segIdx, isPickupLoading, Colors.green),
-            );
-          }
-          break;
-
-        case 'stop':
-          final stop = entry['data'] as Map<String, dynamic>;
-          final color = entry['color'] == 'green' ? Colors.green : Colors.grey;
-          String stopTime = '-';
-          if (_routeStartTime != null) {
-            final estimatedSeconds = stop['estimated_seconds'] as int? ?? 0;
-            final stopDateTime = _routeStartTime!.add(Duration(seconds: estimatedSeconds));
-            stopTime = _formatDateTimeObj(stopDateTime);
-          }
-
-          // Get fractions for sub-stop generation
-          final prevFraction = i > 0 ? _getFractionForEntry(entries[i - 1]) : 0.0;
-          final currentFraction = _getFractionForEntry(entry);
-          final isExpanded = _expandedSegmentIndex == segIdx;
-          final isLoading = _loadingSegment == segIdx;
-
-          // Stop item FIRST
-          timelineItems.add(
-            GestureDetector(
-              onTap: () => _onTimelineTap(segIdx, prevFraction, currentFraction),
-              child: _buildTimelineItem(
-                width, height,
-                isExpanded ? Icons.keyboard_arrow_up : Icons.circle,
-                color,
-                stop['name'] as String? ?? 'Unknown',
-                null,
-                stopTime,
-                isLast: isLast,
-              ),
-            ),
-          );
-
-          // Sub-stops shown BELOW this stop item
-          if (isExpanded || isLoading) {
-            timelineItems.add(
-              _buildSubTimeline(width, height, segIdx, isLoading, color),
-            );
-          }
-          break;
-
-        case 'driver':
-          // Get fractions for sub-stop generation
-          final prevFraction = i > 0 ? _getFractionForEntry(entries[i - 1]) : 0.0;
-          final currentFraction = _getFractionForEntry(entry);
-          final isExpanded = _expandedSegmentIndex == segIdx;
-          final isLoading = _loadingSegment == segIdx;
-
-          // Driver item FIRST
-          timelineItems.add(
-            GestureDetector(
-              onTap: () => _onTimelineTap(segIdx, prevFraction, currentFraction),
-              child: _buildTimelineItem(
-                width, height,
-                Icons.local_shipping,
-                Colors.green,
-                currentLoc?.locationName ?? 'Current Location',
-                _formatDate(currentLoc?.updatedAt),
-                _formatDateTime(currentLoc?.updatedAt),
-                isPulsing: !isExpanded,
-                isLast: isLast,
-              ),
-            ),
-          );
-
-          // Sub-stops shown BELOW driver item
-          if (isExpanded || isLoading) {
-            timelineItems.add(
-              _buildSubTimeline(width, height, segIdx, isLoading, Colors.green),
-            );
-          }
-          break;
-
-        case 'destination':
-          // Get fractions for sub-stop generation
-          final prevFraction = i > 0 ? _getFractionForEntry(entries[i - 1]) : 0.0;
-          final currentFraction = 1.0;
-          final isExpanded = _expandedSegmentIndex == segIdx;
-          final isLoading = _loadingSegment == segIdx;
-
-          if (isExpanded || isLoading) {
-            timelineItems.add(
-              _buildSubTimeline(width, height, segIdx, isLoading, Colors.grey),
-            );
-          }
-
-          String destinationTime = '-';
-          if (_routeStartTime != null && _totalRouteDurationSeconds > 0) {
-            final arrivalTime = _routeStartTime!.add(Duration(seconds: _totalRouteDurationSeconds));
-            destinationTime = _formatDateTimeObj(arrivalTime);
-          }
-          timelineItems.add(
-            GestureDetector(
-              onTap: () => _onTimelineTap(segIdx, prevFraction, currentFraction),
-              child: _buildTimelineItem(
-                width, height,
-                Icons.flag,
-                _booking.status.isCompleted ? Colors.green : Colors.grey,
-                'Destination',
-                destination?.locationName ?? _booking.droppingLocation,
-                _booking.status.isCompleted ? 'Delivered' : destinationTime,
-                isLast: true,
-              ),
-            ),
-          );
-          break;
-      }
+    // Check if driver is AT a fixed stop (within threshold) — if so, merge into that stop
+    bool driverAtFixedStop = false;
+    if (hasCurrentLocation && _currentStopIndex >= 0 && _currentStopIndex < _fixedStops.length) {
+      final currentStop = _fixedStops[_currentStopIndex];
+      final stopLatLng = LatLng(currentStop['lat'] as double, currentStop['lng'] as double);
+      final dist = _haversineDistance(_currentLatLng!, stopLatLng);
+      driverAtFixedStop = dist < 10000; // within 10km = driver is at this stop
     }
+
+    // Vehicle widget — only show as separate item if NOT at a fixed stop and NOT near pickup
+    final bool driverNearPickup = hasCurrentLocation &&
+        _pickupLatLng != null &&
+        _haversineDistance(_currentLatLng!, _pickupLatLng!) < 10000; // within 10km
+    Widget? vehicleWidget;
+    if (hasCurrentLocation && !driverAtFixedStop && !driverNearPickup) {
+      vehicleWidget = _buildTimelineItem(
+        width,
+        height,
+        Icons.local_shipping,
+        Colors.green,
+        driverLoc.name.isNotEmpty ? driverLoc.name : 'Current Location',
+        _formatDate(driverLoc.updatedAt),
+        _formatDateTime(driverLoc.updatedAt),
+        isPulsing: true,
+        isPassed: true,
+      );
+    }
+
+    bool vehicleInserted = false;
+
+    /// -------- Fixed Stops (NEVER changes, only color updates) --------
+    if (_isLoadingFixedStops && _fixedStops.isEmpty) {
+      if (vehicleWidget != null) {
+        timelineItems.add(vehicleWidget);
+        vehicleInserted = true;
+      }
+      timelineItems.add(
+        Padding(
+          padding: EdgeInsets.symmetric(vertical: height * 0.01),
+          child: Row(
+            children: [
+              SizedBox(width: width * 0.09, child: Center(child: Container(width: 2, height: height * 0.04, color: Colors.grey.shade300))),
+              SizedBox(width: width * 0.04),
+              SizedBox(width: width * 0.04, height: width * 0.04, child: const CircularProgressIndicator(strokeWidth: 1.5)),
+              SizedBox(width: width * 0.02),
+              Text('Loading route...', style: TextStyle(fontSize: width * 0.03, color: Colors.grey)),
+            ],
+          ),
+        ),
+      );
+    } else {
+      bool newTimesLocked = false;
+      for (int i = 0; i < _fixedStops.length; i++) {
+        final isPassed = i <= _currentStopIndex;
+
+        // Insert vehicle AFTER the last passed stop (right before first grey stop)
+        if (!vehicleInserted && vehicleWidget != null && !isPassed) {
+          timelineItems.add(vehicleWidget);
+          vehicleInserted = true;
+        }
+
+        final stop = _fixedStops[i];
+        final name = stop['name'] as String? ?? 'Stop ${i + 1}';
+        final isKeyStop = stop['is_key_stop'] == true;
+        final isDriverHere = driverAtFixedStop && i == _currentStopIndex;
+
+        final stopColor = isPassed ? Colors.green : Colors.black;
+        String? subtitle;
+        if (isDriverHere) {
+          subtitle = _formatDate(driverLoc.updatedAt);
+        } else if (isKeyStop) {
+          subtitle = isPassed ? 'Passed' : 'Key Stop';
+        } else if (isPassed) {
+          subtitle = 'Passed';
+        }
+
+        // Calculate time: locked for passed stops, dynamic for future stops
+        final stopFraction = _getStopFraction(i);
+        String time;
+        if (isDriverHere) {
+          time = _formatDateTime(driverLoc.updatedAt);
+        } else if (isPassed) {
+          // Use locked time if available, otherwise lock the current estimated time
+          if (_passedStopTimes.containsKey(i)) {
+            time = _passedStopTimes[i]!;
+          } else {
+            time = _getTimeForFraction(stopFraction);
+            if (time != '-') {
+              _passedStopTimes[i] = time;
+              newTimesLocked = true;
+            }
+          }
+        } else {
+          time = _getTimeForFraction(stopFraction);
+        }
+
+        // Fractions for sub-stop generation on tap
+        final nextFraction = i < _fixedStops.length - 1
+            ? _getStopFraction(i + 1)
+            : 1.0;
+        final segmentIndex = i + 1;
+
+        timelineItems.add(
+          GestureDetector(
+            onTap: () {
+              _onTimelineTap(segmentIndex, stopFraction, nextFraction);
+            },
+            child: _buildTimelineItem(
+              width,
+              height,
+              isDriverHere ? Icons.local_shipping : Icons.circle,
+              stopColor,
+              name,
+              subtitle,
+              time,
+              isKeyStop: isKeyStop,
+              isPassed: isPassed,
+              isPulsing: isDriverHere,
+            ),
+          ),
+        );
+
+        // ── Sub-stops expand on click ──
+        final isExpanded = _expandedSegmentIndex == segmentIndex;
+        final isLoading = _loadingSegment == segmentIndex;
+
+        if (isExpanded) {
+          timelineItems.add(
+            _buildSubTimeline(
+              width,
+              height,
+              segmentIndex,
+              isLoading,
+              isPassed ? Colors.green : Colors.grey,
+            ),
+          );
+        }
+      }
+
+      // Vehicle after all stops if driver is past everything
+      if (!vehicleInserted && vehicleWidget != null) {
+        timelineItems.add(vehicleWidget);
+        vehicleInserted = true;
+      }
+
+      // Persist any newly locked passed stop times
+      if (newTimesLocked) _savePassedStopTimes();
+    }
+
+    /// -------- Destination --------
+    // Use fraction=1.0 for destination to stay consistent with stop times
+    final destinationTime = _getTimeForFraction(1.0);
+
+    timelineItems.add(
+      _buildTimelineItem(
+        width,
+        height,
+        Icons.flag,
+        Colors.black,
+        'Destination',
+        destination.name.isNotEmpty ? destination.name : 'N/A',
+        destinationTime,
+        isLast: true,
+      ),
+    );
 
     return Column(children: timelineItems);
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // FIXED TIMELINE — Layer 1: Business milestones (NEVER changes)
+  // ══════════════════════════════════════════════════════════════════════
+
+  /// Haversine distance in meters between two LatLng points.
+  double _haversineDistance(LatLng a, LatLng b) {
+    const earthRadius = 6371000.0;
+    final dLat = (b.latitude - a.latitude) * pi / 180;
+    final dLng = (b.longitude - a.longitude) * pi / 180;
+    final h = sin(dLat / 2) * sin(dLat / 2) +
+        cos(a.latitude * pi / 180) *
+            cos(b.latitude * pi / 180) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
+    return 2 * earthRadius * asin(sqrt(h));
+  }
+
+  /// Fetch only the full route polyline (no stop generation).
+  /// Used when stops are loaded from cache but polyline is needed for time/sub-stops.
+  Future<void> _fetchFullRoutePolyline() async {
+    if (_pickupLatLng == null || _destinationLatLng == null) return;
+    if (_fullRoutePolyline.isNotEmpty) return; // Already fetched
+
+    final sortedWaypoints = (_trackingData?.routeWaypoints ?? [])
+        .where((wp) => wp.lat != 0 && wp.lng != 0)
+        .toList()
+      ..sort((a, b) => a.priority.compareTo(b.priority));
+    final allWaypoints = sortedWaypoints
+        .map((wp) => LatLng(wp.lat, wp.lng))
+        .toList();
+
+    final routeData = await GoogleMapsService.getRouteWithStops(
+      origin: _pickupLatLng!,
+      destination: _destinationLatLng!,
+      routeWaypoints: allWaypoints,
+    );
+
+    if (routeData.isNotEmpty) {
+      final polylinePoints = routeData['polyline_points'] as List<LatLng>? ?? [];
+      final remaining = routeData['remaining_points'] as List<LatLng>? ?? [];
+      final completed = routeData['completed_points'] as List<LatLng>? ?? [];
+      _fullRoutePolyline = polylinePoints.isNotEmpty
+          ? polylinePoints
+          : [...completed, ...remaining];
+
+      _fullRouteCumulativeDistances = [0.0];
+      for (int i = 1; i < _fullRoutePolyline.length; i++) {
+        _fullRouteCumulativeDistances.add(
+          _fullRouteCumulativeDistances.last +
+              _haversineDistance(_fullRoutePolyline[i - 1], _fullRoutePolyline[i]),
+        );
+      }
+      _fullRouteDurationSeconds = routeData['total_duration_seconds'] as int? ?? _totalRouteDurationSeconds;
+    }
+  }
+
+  /// Fetch full pickup→destination route and generate fixed stops.
+  /// Called ONCE — stops are then persisted and never regenerated.
+  Future<void> _fetchFullRouteAndGenerateFixedStops() async {
+    if (_pickupLatLng == null || _destinationLatLng == null) return;
+
+    setState(() => _isLoadingFixedStops = true);
+
+    // Include ALL waypoints for the full route, sorted by priority
+    final sortedWps = (_trackingData?.routeWaypoints ?? [])
+        .where((wp) => wp.lat != 0 && wp.lng != 0)
+        .toList()
+      ..sort((a, b) => a.priority.compareTo(b.priority));
+    final allWaypoints = sortedWps
+        .map((wp) => LatLng(wp.lat, wp.lng))
+        .toList();
+
+    final routeData = await GoogleMapsService.getRouteWithStops(
+      origin: _pickupLatLng!,
+      destination: _destinationLatLng!,
+      routeWaypoints: allWaypoints,
+    );
+
+    if (routeData.isEmpty) {
+      setState(() => _isLoadingFixedStops = false);
+      return;
+    }
+
+    final polylinePoints = routeData['polyline_points'] as List<LatLng>? ?? [];
+    final remaining = routeData['remaining_points'] as List<LatLng>? ?? [];
+    final completed = routeData['completed_points'] as List<LatLng>? ?? [];
+    final fullPolyline = polylinePoints.isNotEmpty
+        ? polylinePoints
+        : [...completed, ...remaining];
+    final totalDuration = routeData['total_duration_seconds'] as int? ?? _totalRouteDurationSeconds;
+
+    // Build cumulative distances
+    List<double> cumDist = [0.0];
+    for (int i = 1; i < fullPolyline.length; i++) {
+      cumDist.add(cumDist.last + _haversineDistance(fullPolyline[i - 1], fullPolyline[i]));
+    }
+
+    _fullRoutePolyline = fullPolyline;
+    _fullRouteCumulativeDistances = cumDist;
+    _fullRouteDurationSeconds = totalDuration;
+
+    // Calculate stop count: 1 stop per hour, min 3, max 20
+    final totalHours = totalDuration / 3600.0;
+    int stopCount;
+    if (totalHours <= 1) {
+      stopCount = 3;
+    } else if (totalHours <= 3) {
+      stopCount = 4;
+    } else {
+      stopCount = totalHours.round().clamp(5, 20);
+    }
+
+    // Build waypoint entries (key stops), sorted by priority
+    final waypoints = (_trackingData?.routeWaypoints ?? [])
+        ..sort((a, b) => a.priority.compareTo(b.priority));
+    final List<Map<String, dynamic>> waypointStops = [];
+    final Set<String> waypointNames = {};
+
+    for (final wp in waypoints) {
+      if (wp.lat == 0 && wp.lng == 0) continue;
+      waypointStops.add({
+        'name': wp.name.isNotEmpty ? wp.name : 'Waypoint',
+        'lat': wp.lat,
+        'lng': wp.lng,
+        'is_key_stop': true,
+      });
+      if (wp.name.isNotEmpty) waypointNames.add(wp.name.toLowerCase());
+    }
+
+    // Generate auto stops along the full route
+    final autoStops = await GoogleMapsService.generateSubStops(
+      fullPolyline: fullPolyline,
+      cumulativeDistances: cumDist,
+      startFraction: 0.0,
+      endFraction: 1.0,
+      totalDurationSeconds: totalDuration,
+      count: stopCount,
+    );
+
+    // Filter duplicates
+    final filteredAutoStops = <Map<String, dynamic>>[];
+    for (final stop in autoStops) {
+      final name = (stop['name'] as String? ?? '').toLowerCase();
+      if (waypointNames.contains(name) || name == 'unknown') continue;
+
+      final loc = stop['location'] as LatLng?;
+      if (loc == null) continue;
+
+      // Skip if too close to any waypoint
+      bool tooClose = false;
+      for (final wp in waypointStops) {
+        if (_haversineDistance(loc, LatLng(wp['lat'] as double, wp['lng'] as double)) < 5000) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+
+      filteredAutoStops.add({
+        'name': stop['name'],
+        'lat': loc.latitude,
+        'lng': loc.longitude,
+        'is_key_stop': false,
+      });
+    }
+
+    // Merge, order by position on the polyline
+    final allStops = [...waypointStops, ...filteredAutoStops];
+
+    // Sort by distance along full polyline
+    for (final stop in allStops) {
+      final sLat = stop['lat'] as double;
+      final sLng = stop['lng'] as double;
+      double minD = double.infinity;
+      int bestIdx = 0;
+      for (int i = 0; i < fullPolyline.length; i++) {
+        final d = _haversineDistance(LatLng(sLat, sLng), fullPolyline[i]);
+        if (d < minD) {
+          minD = d;
+          bestIdx = i;
+        }
+      }
+      stop['_sortDist'] = cumDist[bestIdx];
+    }
+    allStops.sort((a, b) => (a['_sortDist'] as double).compareTo(b['_sortDist'] as double));
+    // Remove sort key
+    for (final stop in allStops) {
+      stop.remove('_sortDist');
+    }
+
+    if (mounted) {
+      setState(() {
+        _fixedStops = allStops;
+        _isLoadingFixedStops = false;
+      });
+    }
+  }
+
+  /// Uber-style progress: scan all FORWARD stops, find nearest within radius.
+  /// Allows skipping stops (e.g., driver bypasses a city).
+  /// Never moves backward. Cooldown prevents GPS jitter false triggers.
+  void _updateProgress(LatLng currentLocation) {
+    if (_fixedStops.isEmpty) return;
+
+    // ── Cooldown: ignore updates within 20 seconds of last progress change ──
+    if (_lastProgressUpdateTime != null) {
+      final elapsed = DateTime.now().difference(_lastProgressUpdateTime!);
+      if (elapsed.inSeconds < 20) return;
+    }
+
+    // ── Scan only FORWARD stops (never look backward) ──
+    int bestIndex = -1;
+    double bestDistance = double.infinity;
+
+     debugPrint("📡 DRIVER LOCATION: ${currentLocation.latitude}, ${currentLocation.longitude}");
+    for (int i = _currentStopIndex + 1; i < _fixedStops.length; i++) {
+      final stop = _fixedStops[i];
+      final stopLatLng = LatLng(stop['lat'] as double, stop['lng'] as double);
+      
+      final distance = _haversineDistance(currentLocation, stopLatLng);
+
+      // ── Dynamic radius based on stop type ──
+      final isKeyStop = stop['is_key_stop'] == true;
+      final threshold = isKeyStop ? 8000.0 : 4000.0; // city: 8km, town: 4km
+
+      if (distance < threshold && distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = i;
+      }
+    }
+
+    // ── Update only if we found a valid forward stop ──
+    if (bestIndex > _currentStopIndex) {
+      // Lock the time for all newly passed stops
+      final now = DateTime.now();
+      for (int j = _currentStopIndex + 1; j <= bestIndex; j++) {
+        if (!_passedStopTimes.containsKey(j)) {
+          _passedStopTimes[j] = _formatDateTimeObj(now);
+        }
+      }
+      setState(() => _currentStopIndex = bestIndex);
+      _lastProgressUpdateTime = now;
+      _saveCurrentStopIndex();
+      _savePassedStopTimes();
+    }
+    
+    debugPrint("🎯 BEST INDEX FOUND: $bestIndex");
+  }
+
+  /// Save current stop index to SharedPreferences.
+  Future<void> _saveCurrentStopIndex() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('stop_index_${widget.booking.bookingId}', _currentStopIndex);
+    } catch (e) {
+      debugPrint('Error saving stop index: $e');
+    }
+  }
+
+  /// Load current stop index from SharedPreferences.
+  Future<void> _loadCurrentStopIndex() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final idx = prefs.getInt('stop_index_${widget.booking.bookingId}') ?? -1;
+      setState(() => _currentStopIndex = idx);
+      _loadPassedStopTimes();
+    } catch (e) {
+      debugPrint('Error loading stop index: $e');
+    }
+  }
+
+  /// Save passed stop times to SharedPreferences.
+  Future<void> _savePassedStopTimes() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final data = _passedStopTimes.map((k, v) => MapEntry(k.toString(), v));
+      await prefs.setString(
+        'passed_stop_times_${widget.booking.bookingId}',
+        jsonEncode(data),
+      );
+    } catch (e) {
+      debugPrint('Error saving passed stop times: $e');
+    }
+  }
+
+  /// Load passed stop times from SharedPreferences.
+  Future<void> _loadPassedStopTimes() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final json = prefs.getString('passed_stop_times_${widget.booking.bookingId}');
+      if (json == null || json.isEmpty) return;
+      final Map<String, dynamic> decoded = jsonDecode(json);
+      setState(() {
+        _passedStopTimes = decoded.map((k, v) => MapEntry(int.parse(k), v.toString()));
+      });
+    } catch (e) {
+      debugPrint('Error loading passed stop times: $e');
+    }
+  }
+
+  /// Save fixed stops to SharedPreferences.
+  Future<void> _saveFixedStops() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final serializable = _fixedStops.map((stop) {
+        return {
+          'name': stop['name'],
+          'lat': stop['lat'],
+          'lng': stop['lng'],
+          'is_key_stop': stop['is_key_stop'],
+        };
+      }).toList();
+      await prefs.setString(
+        'fixed_stops_${widget.booking.bookingId}',
+        jsonEncode(serializable),
+      );
+    } catch (e) {
+      debugPrint('Error saving fixed stops: $e');
+    }
+  }
+
+  /// Load fixed stops from SharedPreferences. Returns true if loaded.
+  Future<bool> _loadFixedStops() async {
+
+    
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final json = prefs.getString('fixed_stops_${widget.booking.bookingId}');
+      if (json == null || json.isEmpty) return false;
+
+      final List<dynamic> decoded = jsonDecode(json);
+      final stops = decoded.map((item) {
+        return Map<String, dynamic>.from(item);
+      }).toList();
+debugPrint("📦 Loaded Fixed Stops from storage:");
+
+for (var stop in stops) {
+  debugPrint("→ ${stop['name']}");
+}
+      if (stops.isNotEmpty) {
+        setState(() {
+          _fixedStops = stops;
+          _isLoadingFixedStops = false;
+        });
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Error loading fixed stops: $e');
+    }
+    return false;
+  }
+
+  /// Get the distance fraction of a fixed stop on the full route polyline.
+  double _getStopFraction(int stopIndex) {
+    if (stopIndex < 0 || stopIndex >= _fixedStops.length) return 0.0;
+    if (_fullRoutePolyline.isEmpty || _fullRouteCumulativeDistances.isEmpty) return 0.0;
+
+    final stop = _fixedStops[stopIndex];
+    final stopLatLng = LatLng(stop['lat'] as double, stop['lng'] as double);
+
+    double minDist = double.infinity;
+    int closestIdx = 0;
+    for (int i = 0; i < _fullRoutePolyline.length; i++) {
+      final d = _haversineDistance(stopLatLng, _fullRoutePolyline[i]);
+      if (d < minDist) {
+        minDist = d;
+        closestIdx = i;
+      }
+    }
+    return _fullRouteCumulativeDistances[closestIdx] / _fullRouteCumulativeDistances.last;
+  }
+
+  String _getTimeForFraction(double fraction) {
+    // Use full route duration for fraction-based time calculation
+    // so each stop gets a distinct time proportional to its distance along the route
+    final duration = _fullRouteDurationSeconds > 0
+        ? _fullRouteDurationSeconds
+        : _totalRouteDurationSeconds;
+    if (duration == 0) return '-';
+
+    // Use journey start time (inProgressAt) as base for full route times,
+    // fallback to routeStartTime
+    DateTime? baseTime;
+    if (_trackingData?.inProgressAt != null && _trackingData!.inProgressAt!.isNotEmpty) {
+      try {
+        baseTime = DateTime.parse(_trackingData!.inProgressAt!);
+      } catch (_) {}
+    }
+    baseTime ??= _routeStartTime;
+    if (baseTime == null) return '-';
+
+    final seconds = (fraction * duration).round();
+    final dt = baseTime.add(Duration(seconds: seconds));
+
+    return _formatDateTimeObj(dt);
+  }
+
   /// Build the sub-timeline items between two main stops
-  Widget _buildSubTimeline(double width, double height, int segmentIndex, bool isLoading, Color lineColor) {
+  Widget _buildSubTimeline(
+    double width,
+    double height,
+    int segmentIndex,
+    bool isLoading,
+    Color lineColor,
+  ) {
     if (isLoading && !_subStopsCache.containsKey(segmentIndex)) {
       return Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Left column — same width as main timeline icon column
           SizedBox(
-            width: width * 0.08,
+            width: width * 0.09,
             child: Center(
-              child: Container(width: 2, height: height * 0.04, color: Colors.grey.shade300),
+              child: Container(
+                width: 2,
+                height: height * 0.04,
+                color: Colors.grey.shade300,
+              ),
             ),
           ),
           SizedBox(width: width * 0.04),
@@ -1524,7 +2492,10 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                   child: const CircularProgressIndicator(strokeWidth: 1.5),
                 ),
                 SizedBox(width: width * 0.02),
-                Text('Loading...', style: TextStyle(fontSize: width * 0.03, color: Colors.grey)),
+                Text(
+                  'Loading...',
+                  style: TextStyle(fontSize: width * 0.03, color: Colors.grey),
+                ),
               ],
             ),
           ),
@@ -1547,8 +2518,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             subTime = _formatDateTimeObj(dt);
           }
           return _buildSubTimelineItem(
-            width, height,
-            sub['name'] as String? ?? 'Unknown',
+            width,
+            height,
+            sub['name'],
             subTime,
             lineColor,
           );
@@ -1559,8 +2531,11 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
   /// Single sub-timeline item (smaller dot, lighter style)
   Widget _buildSubTimelineItem(
-    double width, double height,
-    String name, String time, Color lineColor,
+    double width,
+    double height,
+    String name,
+    String time,
+    Color lineColor,
   ) {
     final dotSize = width * 0.025;
     return Row(
@@ -1568,20 +2543,31 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       children: [
         // Left column — same width as main timeline, centered line + dot
         SizedBox(
-          width: width * 0.08,
+          width: width * 0.09,
           child: Column(
             children: [
-              Container(width: 2, height: height * 0.015, color: Colors.grey.shade300),
+              Container(
+                width: 2,
+                height: height * 0.015,
+                color: Colors.grey.shade300,
+              ),
               Container(
                 width: dotSize,
                 height: dotSize,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(color: lineColor.withValues(alpha: 0.6), width: 1.5),
+                  border: Border.all(
+                    color: lineColor.withValues(alpha: 0.6),
+                    width: 1.5,
+                  ),
                   color: Colors.white,
                 ),
               ),
-              Container(width: 2, height: height * 0.015, color: Colors.grey.shade300),
+              Container(
+                width: 2,
+                height: height * 0.015,
+                color: Colors.grey.shade300,
+              ),
             ],
           ),
         ),
@@ -1621,6 +2607,59 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     );
   }
 
+  String _formatDateTime(String? dateTimeStr) {
+    if (dateTimeStr == null || dateTimeStr.isEmpty) return '-';
+    try {
+      final dateTime = DateTime.parse(dateTimeStr);
+      final hour = dateTime.hour > 12 ? dateTime.hour - 12 : dateTime.hour;
+      final amPm = dateTime.hour >= 12 ? 'PM' : 'AM';
+      return '${hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')} $amPm';
+    } catch (e) {
+      return '-';
+    }
+  }
+
+  String _formatDate(String? dateTimeStr) {
+    if (dateTimeStr == null || dateTimeStr.isEmpty) return '';
+    try {
+      final dateTime = DateTime.parse(dateTimeStr);
+      return '${dateTime.day.toString().padLeft(2, '0')}/${dateTime.month.toString().padLeft(2, '0')}/${dateTime.year}';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /// Convert "HH:mm" (24h) string to "hh:mm AM/PM" (12h) format
+  String _format24to12(String time24) {
+    try {
+      final parts = time24.split(':');
+      final hour24 = int.parse(parts[0]);
+      final minute = parts[1];
+      final hour = hour24 > 12 ? hour24 - 12 : (hour24 == 0 ? 12 : hour24);
+      final amPm = hour24 >= 12 ? 'PM' : 'AM';
+      return '${hour.toString().padLeft(2, '0')}:$minute $amPm';
+    } catch (_) {
+      return time24;
+    }
+  }
+
+  String _formatDateTimeObj(DateTime dateTime) {
+    final hour = dateTime.hour > 12
+        ? dateTime.hour - 12
+        : (dateTime.hour == 0 ? 12 : dateTime.hour);
+    final amPm = dateTime.hour >= 12 ? 'PM' : 'AM';
+    return '${hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')} $amPm';
+  }
+
+  String _formatDuration(int totalSeconds) {
+    if (totalSeconds <= 0) return '';
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    if (hours > 0 && minutes > 0) return '$hours hours $minutes mins';
+    if (hours > 0) return '$hours hours';
+    return '$minutes mins';
+  }
+
   Widget _buildTimelineItem(
     double width,
     double height,
@@ -1631,22 +2670,29 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     String time, {
     bool isFirst = false,
     bool isLast = false,
+    bool etaLabel = false,
     bool isPulsing = false,
+    bool isKeyStop = false,
+    bool isPassed = false,
   }) {
+    final isActive = iconColor == Colors.green || isPassed;
+    final activeColor = Colors.green;
     final iconCircle = Container(
-      width: width * 0.08,
-      height: width * 0.08,
+      width: width * 0.09,
+      height: width * 0.09,
       decoration: BoxDecoration(
-        color: iconColor == Colors.green
-            ? Colors.green
-            : Colors.grey.shade400,
+        color: isActive ? activeColor.shade50 : Colors.grey.shade100,
         shape: BoxShape.circle,
+        border: Border.all(
+          color: isActive ? activeColor : Colors.grey.shade300,
+          width: 2,
+        ),
       ),
       alignment: Alignment.center,
       child: Icon(
         icon,
-        size: width * 0.045,
-        color: Colors.white,
+        size: width * 0.04,
+        color: isActive ? activeColor : Colors.grey.shade500,
       ),
     );
 
@@ -1657,18 +2703,17 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           children: [
             isPulsing
                 ? SizedBox(
-                    width: width * 0.08,
-                    height: width * 0.08,
+                    width: width * 0.09,
+                    height: width * 0.09,
                     child: Stack(
                       clipBehavior: Clip.none,
                       alignment: Alignment.center,
                       children: [
-                        // Animated pulse ring
                         AnimatedBuilder(
                           animation: _pulseAnimation,
                           builder: (context, child) {
-                            final size = width * 0.08 * _pulseAnimation.value;
-                            final offset = (size - width * 0.08) / 2;
+                            final size = width * 0.09 * _pulseAnimation.value;
+                            final offset = (size - width * 0.09) / 2;
                             return Positioned(
                               left: -offset,
                               top: -offset,
@@ -1696,10 +2741,36 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                   )
                 : iconCircle,
             if (!isLast)
-              Container(
-                width: 2,
-                height: height * 0.045,
-                color: Colors.grey.shade300,
+              Builder(
+                builder: (context) {
+                  double lineHeight;
+                  if (subtitle != null && subtitle.isNotEmpty) {
+                    // Measure subtitle lines to adjust connecting line height
+                    final textSpan = TextSpan(
+                      text: subtitle,
+                      style: TextStyle(fontSize: width * 0.034),
+                    );
+                    final tp = TextPainter(
+                      text: textSpan,
+                      textDirection: TextDirection.ltr,
+                      maxLines: 2,
+                    );
+                    tp.layout(maxWidth: width * 0.55);
+                    final lines = tp.computeLineMetrics().length;
+                    if (lines >= 2) {
+                      lineHeight = height * 0.04;
+                    } else {
+                      lineHeight = height * 0.061;
+                    }
+                  } else {
+                    lineHeight = height * 0.035;
+                  }
+                  return Container(
+                    width: isPassed ? 3 : 2,
+                    height: lineHeight,
+                    color: isPassed ? Colors.green : Colors.grey.shade300,
+                  );
+                },
               ),
           ],
         ),
@@ -1717,9 +2788,11 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                       children: [
                         Text(
                           title,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontSize: width * 0.038,
-                            fontWeight: FontWeight.w600,
+                            fontSize: isKeyStop ? width * 0.042 : width * 0.038,
+                            fontWeight: isKeyStop ? FontWeight.w800 : FontWeight.w600,
                           ),
                         ),
                         if (subtitle != null && subtitle.isNotEmpty)
@@ -1736,16 +2809,61 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                     ),
                   ),
                   SizedBox(width: width * 0.02),
-                  Text(
-                    time,
-                    style: TextStyle(
-                      fontSize: width * 0.036,
-                      color: Colors.grey.shade600,
-                    ),
-                  ),
+                  etaLabel
+                      ? Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: width * 0.025,
+                            vertical: width * 0.012,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(
+                              0xFF0077C8,
+                            ).withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'Deliver in',
+                                style: TextStyle(
+                                  fontSize: width * 0.028,
+                                  color: const Color(0xFF0077C8),
+                                ),
+                              ),
+                              SizedBox(height: width * 0.005),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.access_time,
+                                    size: width * 0.035,
+                                    color: const Color(0xFF0077C8),
+                                  ),
+                                  SizedBox(width: width * 0.01),
+                                  Text(
+                                    time,
+                                    style: TextStyle(
+                                      fontSize: width * 0.032,
+                                      fontWeight: FontWeight.w600,
+                                      color: const Color(0xFF0077C8),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        )
+                      : Text(
+                          time,
+                          style: TextStyle(
+                            fontSize: width * 0.036,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
                 ],
               ),
-              if (!isLast) SizedBox(height: height * 0.01),
+              if (!isLast) SizedBox(height: height * 0.0),
             ],
           ),
         ),
@@ -1754,128 +2872,100 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   }
 
   Widget _buildLastUpdateCard(double width, double height) {
-    final currentLoc = _booking.currentLocation;
-    final hasCurrentLocation =
-        currentLoc != null && currentLoc.lat != null && currentLoc.lng != null;
+    if (_trackingData == null) return const SizedBox.shrink();
 
-    // Format the last update time
-    String lastUpdateTime = _formatDateTime(currentLoc?.updatedAt);
-    String lastUpdateDate = _formatDate(currentLoc?.updatedAt);
+    final driverLoc = _trackingData!.driverLocation;
+    final hasCurrentLocation = driverLoc.lat != 0 && driverLoc.lng != 0;
 
-    // Get location name
-    String locationName = currentLoc?.locationName ?? 'Location not available';
+    // Get last update from driverLocation.updatedAt
+    String lastUpdateTime = _formatDateTime(driverLoc.updatedAt);
+    String lastUpdateDate = _formatDate(driverLoc.updatedAt);
+    print("checking for last update $lastUpdateDate");
+    print("checking for last update $lastUpdateTime");
+    // Get location name from API response
+    String locationName = driverLoc.name.isNotEmpty
+        ? driverLoc.name
+        : 'Location not available';
 
     return Container(
-      padding: EdgeInsets.all(width * 0.04),
+      padding: EdgeInsets.symmetric(
+        horizontal: width * 0.04,
+        vertical: width * 0.035,
+      ),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 16,
+            offset: const Offset(0, -2),
           ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
+      child: Row(
         children: [
-          // Last Update Title
-          Text(
-            'Last Update',
-            style: TextStyle(
-              fontSize: width * 0.04,
-              fontWeight: FontWeight.bold,
-              color: Colors.black87,
+          // Live indicator
+          Container(
+            padding: EdgeInsets.all(width * 0.025),
+            decoration: BoxDecoration(
+              color: hasCurrentLocation
+                  ? Colors.green.shade50
+                  : Colors.grey.shade100,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.local_shipping,
+              size: width * 0.045,
+              color: hasCurrentLocation ? Colors.green : Colors.grey,
             ),
           ),
-          SizedBox(height: height * 0.015),
-
-          // Status indicator and time
-          Row(
-            children: [
-              // Green dot indicator
-              Container(
-                width: 10,
-                height: 10,
-                decoration: BoxDecoration(
-                  color: hasCurrentLocation ? Colors.green : Colors.grey,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              SizedBox(width: width * 0.03),
-              // Time and date
-              Text(
-                '$lastUpdateTime, $lastUpdateDate',
-                style: TextStyle(
-                  fontSize: width * 0.038,
-                  color: Colors.grey.shade700,
-                ),
-              ),
-            ],
-          ),
-          SizedBox(height: height * 0.01),
-
-          // Location name
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(width: width * 0.055), // Align with text above
-              Expanded(
-                child: Text(
+          SizedBox(width: width * 0.03),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
                   locationName,
                   style: TextStyle(
-                    fontSize: width * 0.035,
-                    color: Colors.grey.shade600,
+                    fontSize: width * 0.036,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black87,
                   ),
-                  maxLines: 2,
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
+                SizedBox(height: 2),
+                Text(
+                  '$lastUpdateTime, $lastUpdateDate',
+                  style: TextStyle(
+                    fontSize: width * 0.03,
+                    color: Colors.grey.shade500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Center on vehicle
+          GestureDetector(
+            onTap: _centerOnVehicle,
+            child: Container(
+              padding: EdgeInsets.all(width * 0.025),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0077C8).withValues(alpha: 0.1),
+                shape: BoxShape.circle,
               ),
-            ],
+              child: Icon(
+                Icons.my_location,
+                size: width * 0.045,
+                color: const Color(0xFF0077C8),
+              ),
+            ),
           ),
         ],
       ),
     );
-  }
-
-  String _formatDateTime(String? dateTimeStr) {
-    if (dateTimeStr == null || dateTimeStr.isEmpty) return '-';
-    try {
-      final dateTime = DateTime.parse(dateTimeStr);
-      return DateFormat('hh:mm a').format(dateTime);
-    } catch (e) {
-      return '-';
-    }
-  }
-
-  String _formatDate(String? dateTimeStr) {
-    if (dateTimeStr == null || dateTimeStr.isEmpty) return '';
-    try {
-      final dateTime = DateTime.parse(dateTimeStr);
-      return DateFormat('dd/MM/yyyy').format(dateTime);
-    } catch (e) {
-      return '';
-    }
-  }
-
-  String _formatDateTimeObj(DateTime dateTime) {
-    final hour = dateTime.hour > 12
-        ? dateTime.hour - 12
-        : (dateTime.hour == 0 ? 12 : dateTime.hour);
-    final amPm = dateTime.hour >= 12 ? 'PM' : 'AM';
-    return '${hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')} $amPm';
-  }
-
-  String _formatDuration(int totalSeconds) {
-    if (totalSeconds <= 0) return '';
-    final hours = totalSeconds ~/ 3600;
-    final minutes = (totalSeconds % 3600) ~/ 60;
-    if (hours > 0 && minutes > 0) return '$hours hours $minutes mins';
-    if (hours > 0) return '$hours hours';
-    return '$minutes mins';
   }
 
   void _centerOnVehicle() {
@@ -1893,10 +2983,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     try {
       _expandedMapController!.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(
-            target: _currentLatLng!,
-            zoom: 15.0,
-          ),
+          CameraPosition(target: _currentLatLng!, zoom: 15.0),
         ),
       );
     } catch (e) {
@@ -1906,9 +2993,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
   @override
   void dispose() {
+    _pulseController.dispose();
     _timeAgoTimer?.cancel();
     _autoRefreshTimer?.cancel();
-    _pulseController.dispose();
     _smallMapController?.dispose();
     _expandedMapController?.dispose();
     super.dispose();

@@ -1275,6 +1275,28 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
             ),
           ],
 
+          // Priority info - only show if priority is available
+          if (booking.driverDetails.priority != null) ...[
+            SizedBox(height: height * 0.015),
+            Row(
+              children: [
+                Icon(
+                  Icons.low_priority_rounded,
+                  size: width * 0.045,
+                  color: Colors.grey.shade700,
+                ),
+                SizedBox(width: width * 0.02),
+                Text(
+                'Priority: ${booking.driverDetails.priority.toString()}'  ,
+                  style: TextStyle(
+                    fontSize: width * 0.038,
+                    color: Colors.grey.shade700,
+                  ),
+                ),
+              ],
+            ),
+          ],
+
           // Farmer info - only show if farmer name is not empty
           if (booking.farmer.name.isNotEmpty) ...[
             SizedBox(height: height * 0.015),
