@@ -45,6 +45,12 @@ const Duration _fallbackPollInterval = Duration(minutes: 2);
 const Duration _connectivityCheckInterval = Duration(seconds: 30);
 const Duration _maxStalePositionAge = Duration(minutes: 10);
 const Duration _dbCleanupInterval = Duration(hours: 1);
+const Duration _movingUpdateInterval = Duration(seconds: 10);
+const Duration _stoppedHeartbeatInterval = Duration(seconds: 15);
+const Duration _reverseGeocodeRefreshInterval = Duration(minutes: 5);
+const double _minMovementMetersForSend = 10;
+const double _significantMovementMetersForSend = 150;
+const double _reverseGeocodeRefreshMeters = 400;
 
 class BackgroundLocationService {
   static final FlutterBackgroundService _service = FlutterBackgroundService();
@@ -199,6 +205,11 @@ Future<void> _onStart(ServiceInstance service) async {
   // Connectivity & retry state
   bool isOnline = true;
   int consecutiveFailures = 0;
+  Position? lastSentPosition;
+  DateTime? lastSentAt;
+  Position? lastReverseGeocodedPosition;
+  DateTime? lastReverseGeocodedAt;
+  String? lastResolvedLocationName;
 
   // Connectivity check helper
   Future<bool> hasInternetConnectivity() async {
@@ -404,6 +415,94 @@ Future<void> _onStart(ServiceInstance service) async {
     }
   }
 
+  double distanceBetweenPositions(Position a, Position b) {
+    return Geolocator.distanceBetween(
+      a.latitude,
+      a.longitude,
+      b.latitude,
+      b.longitude,
+    );
+  }
+
+  bool shouldSendPosition(Position position) {
+    final now = DateTime.now();
+
+    // ── Reject low-accuracy positions (cell tower / WiFi triangulation) ──
+    // Real GPS accuracy: 5-30m. Cell tower: 300-2000m. WiFi: 50-200m.
+    // Positions with accuracy > 100m are NOT real GPS — they cause ghost
+    // locations (e.g. phone shows Madhapur but driver is at Borabanda).
+    if (position.accuracy > 100) {
+      print('BackgroundLocationService: Rejected low-accuracy position '
+          '(accuracy=${position.accuracy.toStringAsFixed(0)}m) — '
+          'likely cell tower/WiFi, not real GPS');
+      return false;
+    }
+
+    if (lastSentAt == null || lastSentPosition == null) {
+      return true;
+    }
+
+    final sinceLastSend = now.difference(lastSentAt!);
+    final movedMeters = distanceBetweenPositions(lastSentPosition!, position);
+
+    // ── Reject sudden jumps from cached/stale positions ──
+    // If accuracy was good but position jumped >500m from last sent position
+    // in under 5 seconds, it's likely a stale/cached position being replayed.
+    if (movedMeters > 500 && sinceLastSend.inSeconds < 5) {
+      print('BackgroundLocationService: Rejected position jump '
+          '(${movedMeters.toStringAsFixed(0)}m in ${sinceLastSend.inSeconds}s)');
+      return false;
+    }
+
+    if (movedMeters >= _significantMovementMetersForSend) {
+      return true;
+    }
+
+    if (movedMeters >= _minMovementMetersForSend &&
+        sinceLastSend >= _movingUpdateInterval) {
+      return true;
+    }
+
+    if (sinceLastSend >= _stoppedHeartbeatInterval) {
+      return true;
+    }
+
+    return false;
+  }
+
+  Future<String?> resolveLocationName(Position position) async {
+    final now = DateTime.now();
+
+    if (lastResolvedLocationName != null &&
+        lastReverseGeocodedPosition != null &&
+        lastReverseGeocodedAt != null) {
+      final movedSinceLastLookup = distanceBetweenPositions(
+        lastReverseGeocodedPosition!,
+        position,
+      );
+      final isLookupFresh =
+          now.difference(lastReverseGeocodedAt!) < _reverseGeocodeRefreshInterval;
+
+      if (movedSinceLastLookup < _reverseGeocodeRefreshMeters && isLookupFresh) {
+        return lastResolvedLocationName;
+      }
+    }
+
+    try {
+      final resolved = await _reverseGeocodeHttp(
+        position.latitude,
+        position.longitude,
+      );
+      if (resolved != null && resolved.isNotEmpty) {
+        lastResolvedLocationName = resolved;
+      }
+    } catch (_) {}
+
+    lastReverseGeocodedPosition = position;
+    lastReverseGeocodedAt = now;
+    return lastResolvedLocationName;
+  }
+
   // ---------- Send a single position to the backend ----------
   // Returns true  → keep running
   // Returns false → stop the service (journey ended / no token / flag off)
@@ -424,17 +523,15 @@ Future<void> _onStart(ServiceInstance service) async {
       return false;
     }
 
+    if (!shouldSendPosition(position)) {
+      return true;
+    }
+
     print('BackgroundLocationService: Position -> '
         'lat=${position.latitude}, lng=${position.longitude}');
 
     // Reverse geocode (non-critical — OK if it fails)
-    String? locationName;
-    try {
-      locationName = await _reverseGeocodeHttp(
-        position.latitude,
-        position.longitude,
-      );
-    } catch (_) {}
+    final locationName = await resolveLocationName(position);
 
     // Always save to SQLite first (crash-proof)
     await queuePosition(position, locationName: locationName);
@@ -452,10 +549,21 @@ Future<void> _onStart(ServiceInstance service) async {
           'lat': position.latitude,
           'lng': position.longitude,
           'location_name': locationName ?? 'Live vehicle location',
+          'accuracy': position.accuracy,
         }),
       ).timeout(const Duration(seconds: 30));
 
       print('BackgroundLocationService: API Response ${response.statusCode}');
+
+      // 401 = token revoked (driver logged in on another device)
+      // Stop sending GPS immediately — this device is no longer authorized.
+      if (response.statusCode == 401) {
+        print('BackgroundLocationService: 401 Unauthorized — '
+            'token revoked (logged in on another device). Stopping.');
+        await prefs.setBool(_serviceRunningKey, false);
+        await prefs.remove(_tokenKey);
+        return false;
+      }
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         final data = jsonDecode(response.body);
@@ -475,6 +583,8 @@ Future<void> _onStart(ServiceInstance service) async {
 
         updateNotification(
             'Location: ${locationName ?? 'Tracking active...'}');
+        lastSentPosition = position;
+        lastSentAt = DateTime.now();
 
         service.invoke('locationUpdate', {
           'lat': position.latitude,
@@ -536,18 +646,18 @@ Future<void> _onStart(ServiceInstance service) async {
 
     positionSub = Geolocator.getPositionStream(
       locationSettings: AndroidSettings(
-        accuracy: LocationAccuracy.high,
-        intervalDuration: const Duration(minutes: 2),
+        accuracy: LocationAccuracy.best,
+        intervalDuration: _movingUpdateInterval,
         distanceFilter: 0,
-        // On stream restart attempts > 2, try the platform LocationManager
-        // instead of Fused Location Provider. Some OEMs (OnePlus, Realme)
-        // kill the FLP but leave the platform LocationManager alive.
-        forceLocationManager: streamRestartCount > 2,
+        // Force GPS-only via platform LocationManager — avoids cell tower /
+        // WiFi triangulation that causes location jumps (e.g. Borabanda ghost).
+        forceLocationManager: true,
       ),
     ).listen(
       (position) async {
         if (shouldStop) return;
         lastStreamPositionTime = DateTime.now();
+
         try {
           final keepRunning = await sendPosition(position);
           if (!keepRunning) {
@@ -611,7 +721,7 @@ Future<void> _onStart(ServiceInstance service) async {
       Position? pos;
       try {
         pos = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high,
+          desiredAccuracy: LocationAccuracy.best,
           timeLimit: const Duration(seconds: 15),
         );
       } catch (_) {
@@ -650,7 +760,7 @@ Future<void> _onStart(ServiceInstance service) async {
     Position? firstPos;
     try {
       firstPos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
+        desiredAccuracy: LocationAccuracy.best,
         timeLimit: const Duration(seconds: 15),
       );
     } catch (_) {
@@ -825,7 +935,7 @@ Future<bool> _onIosBackground(ServiceInstance service) async {
     Position? position;
     try {
       position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
+        desiredAccuracy: LocationAccuracy.best,
         timeLimit: const Duration(seconds: 15),
       );
     } catch (_) {

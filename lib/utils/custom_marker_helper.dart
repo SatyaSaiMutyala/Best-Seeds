@@ -251,21 +251,50 @@ class CustomMarkerHelper {
     return BitmapDescriptor.defaultMarker;
   }
 
-  // ============ Legacy methods for backward compatibility ============
+  /// Navigation arrow marker (Uber / Google Maps style).
+  /// Dark circle with white directional arrow inside.
+  static Future<BitmapDescriptor> getVehicleArrowMarker({int size = 60}) async {
+    final double s = size.toDouble();
+    final ui.PictureRecorder recorder = ui.PictureRecorder();
+    final Canvas canvas = Canvas(recorder);
+    final double cx = s / 2;
+    final double cy = s / 2;
+    final double radius = s * 0.40;
 
-  /// Create a truck marker icon from an asset image (legacy)
-  static Future<BitmapDescriptor> getTruckMarker({
-    double size = 80,
-  }) async {
-    return getTruckMarkerFromAsset(size: size);
+    canvas.drawCircle(Offset(cx, cy + 1), radius + 2,
+        Paint()..color = const Color(0x30000000)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+    canvas.drawCircle(Offset(cx, cy), radius + 2, Paint()..color = const Color(0xFFFFFFFF));
+    canvas.drawCircle(Offset(cx, cy), radius, Paint()..color = const Color(0xFF1A1A2E));
+
+    final double arrowH = radius * 1.1;
+    final double arrowW = radius * 0.8;
+    final double arrowTop = cy - arrowH * 0.5;
+    final Path arrowPath = Path()
+      ..moveTo(cx, arrowTop)
+      ..lineTo(cx + arrowW / 2, arrowTop + arrowH * 0.75)
+      ..lineTo(cx, arrowTop + arrowH * 0.55)
+      ..lineTo(cx - arrowW / 2, arrowTop + arrowH * 0.75)
+      ..close();
+    canvas.drawPath(arrowPath, Paint()..color = const Color(0xFFFFFFFF)..style = PaintingStyle.fill);
+
+    final ui.Picture picture = recorder.endRecording();
+    final ui.Image image = await picture.toImage(size, size);
+    final ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (byteData != null) return BitmapDescriptor.bytes(byteData.buffer.asUint8List());
+    return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueViolet);
   }
 
-  /// Create a truck marker with custom design (legacy - now uses asset first)
+  // ============ Legacy methods — now use navigation arrow ============
+
+  static Future<BitmapDescriptor> getTruckMarker({double size = 80}) async {
+    return getVehicleArrowMarker(size: size.toInt());
+  }
+
   static Future<BitmapDescriptor> createTruckMarker({
     double size = 100,
     Color backgroundColor = const Color(0xFF0077C8),
   }) async {
-    return getTruckMarkerFromAsset(size: size);
+    return getVehicleArrowMarker(size: size.toInt());
   }
 
   /// Create a location pin marker (legacy - now uses asset first)

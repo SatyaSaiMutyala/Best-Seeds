@@ -62,6 +62,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
   bool _isRemovingDriver = false;
   bool _isSaving = false;
   bool _hasChanges = false;
+  late BookingDriverDetails _driverDetails;
   int? _selectedBookingStatus;
   int? _selectedDeliveryReason;
 
@@ -88,6 +89,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
   @override
   void initState() {
     super.initState();
+    _driverDetails = widget.booking.driverDetails;
     _initControllers();
   }
 
@@ -468,10 +470,10 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                           child: _buildOutlineButton(
                             width,
                             height,
-                            widget.booking.driverDetails.isAssigned
+                            _driverDetails.isAssigned
                                 ? 'Change Driver'
                                 : 'Add Driver',
-                            widget.booking.driverDetails.isAssigned
+                            _driverDetails.isAssigned
                                 ? Icons.swap_horiz
                                 : Icons.add,
                             () => _showChangeDriverBottomSheet(context),
@@ -480,7 +482,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                       ],
                     ),
                     SizedBox(height: height * 0.03),
-                    if (widget.booking.driverDetails.isAssigned) ...[
+                    if (_driverDetails.isAssigned) ...[
                       _buildDriverInfoCard(width, height),
                     ]
                   ],
@@ -1038,7 +1040,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
     final width = MediaQuery.of(context).size.width;
     final height = MediaQuery.of(context).size.height;
 
-    final existingDriver = widget.booking.driverDetails;
+    final existingDriver = _driverDetails;
     final bool isEditing = existingDriver.isAssigned;
 
     // Pre-fill with existing data if editing
@@ -1145,7 +1147,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          widget.booking.driverDetails.isAssigned
+                          _driverDetails.isAssigned
                               ? 'Change Driver'
                               : 'Add Driver',
                           style: TextStyle(
@@ -1756,7 +1758,29 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                                   AppSnackbar.success(
                                       'Driver assigned successfully');
                                   if (mounted) {
-                                    setState(() => _hasChanges = true);
+                                    setState(() {
+                                      _hasChanges = true;
+                                      _driverDetails = BookingDriverDetails(
+                                        driverId: isAddNewDriver ? null : selectedDriver!.id,
+                                        name: isAddNewDriver
+                                            ? newDriverNameController.text.trim()
+                                            : selectedDriver!.name,
+                                        mobile: isAddNewDriver
+                                            ? newDriverMobileController.text.trim()
+                                            : selectedDriver!.mobile,
+                                        vehicleNumber: vehicleNumberController.text,
+                                        vehicleStartDate: vehicleStartDate != null
+                                            ? _formatDateForApi(vehicleStartDate!)
+                                            : null,
+                                        vehicleEndDate: vehicleEndDate != null
+                                            ? _formatDateForApi(vehicleEndDate!)
+                                            : null,
+                                        vehicleStartLat: vehicleStartLat,
+                                        vehicleStartLng: vehicleStartLng,
+                                        vehicleStartAddress: vehicleStartAddress,
+                                        priority: selectedPriority,
+                                      );
+                                    });
                                   }
                                   if (context.mounted) {
                                     Navigator.pop(
@@ -1791,7 +1815,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                             : Text(
                                 isAddNewDriver
                                     ? 'Add New Driver'
-                                    : (widget.booking.driverDetails.isAssigned
+                                    : (_driverDetails.isAssigned
                                         ? 'Change Driver'
                                         : 'Add Driver'),
                                 style: TextStyle(
@@ -1813,7 +1837,7 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
   }
 
   Widget _buildDriverInfoCard(double width, double height) {
-    final driver = widget.booking.driverDetails;
+    final driver = _driverDetails;
 
     return Stack(children: [
       Container(

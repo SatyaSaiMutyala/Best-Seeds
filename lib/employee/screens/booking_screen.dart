@@ -29,6 +29,9 @@ class _BookingScreenState extends State<BookingScreen> {
   bool _hasMore = true;
   bool _isLoadingMore = false;
 
+  // Request token to discard stale responses when switching tabs quickly
+  int _loadRequestId = 0;
+
   // Search and filter
   final TextEditingController _searchController = TextEditingController();
 
@@ -105,6 +108,10 @@ class _BookingScreenState extends State<BookingScreen> {
         _selectedBookingType == null &&
         _selectedVehicleAvailability == null;
 
+    // Tag this load so any in-flight responses from a previous tab are ignored
+    final reqId = ++_loadRequestId;
+    final requestedTab = _currentTab;
+
     setState(() {
       _isLoading = true;
       _error = null;
@@ -115,8 +122,9 @@ class _BookingScreenState extends State<BookingScreen> {
 
     // Load cached data first for instant display
     if (isCacheable) {
-      final cached = await _repo.getCachedBookings(_currentTab);
-      if (cached != null && cached.bookings.isNotEmpty && mounted) {
+      final cached = await _repo.getCachedBookings(requestedTab);
+      if (reqId != _loadRequestId || !mounted) return;
+      if (cached != null && cached.bookings.isNotEmpty) {
         setState(() {
           _allBookings = cached.bookings;
           _allCount = cached.counts.all;
@@ -133,55 +141,55 @@ class _BookingScreenState extends State<BookingScreen> {
     try {
       final token = _storage.getToken();
       if (token == null) {
-        if (mounted) {
-          setState(() {
-            if (_allBookings.isEmpty) {
-              _error = 'Session expired. Please login again.';
-            }
-            _isLoading = false;
-          });
-        }
+        if (reqId != _loadRequestId || !mounted) return;
+        setState(() {
+          if (_allBookings.isEmpty) {
+            _error = 'Session expired. Please login again.';
+          }
+          _isLoading = false;
+        });
         return;
       }
 
       final response = await _repo.getBookingsPage(
         token,
         page: 1,
-        tab: _currentTab,
+        tab: requestedTab,
         search: searchText.isNotEmpty ? searchText : null,
         bookingType: _selectedBookingType,
         vehicleAvailability: _selectedVehicleAvailability,
       );
-      if (mounted) {
+      if (reqId != _loadRequestId || !mounted) return;
+      setState(() {
+        _allBookings = response.bookings;
+        _allCount = response.counts.all;
+        _newCount = response.counts.newBookings;
+        _currentCount = response.counts.current;
+        _pastCount = response.counts.past;
+        _hasMore =
+            response.pagination.currentPage < response.pagination.lastPage;
+        _currentPage = 1;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (reqId != _loadRequestId || !mounted) return;
+      if (_allBookings.isEmpty) {
         setState(() {
-          _allBookings = response.bookings;
-          _allCount = response.counts.all;
-          _newCount = response.counts.newBookings;
-          _currentCount = response.counts.current;
-          _pastCount = response.counts.past;
-          _hasMore =
-              response.pagination.currentPage < response.pagination.lastPage;
-          _currentPage = 1;
+          _error = extractErrorMessage(e);
           _isLoading = false;
         });
-      }
-    } catch (e) {
-      if (mounted) {
-        if (_allBookings.isEmpty) {
-          setState(() {
-            _error = extractErrorMessage(e);
-            _isLoading = false;
-          });
-        } else {
-          setState(() => _isLoading = false);
-          AppSnackbar.error('Could not refresh bookings');
-        }
+      } else {
+        setState(() => _isLoading = false);
+        AppSnackbar.error('Could not refresh bookings');
       }
     }
   }
 
   Future<void> _loadMoreBookings() async {
     if (_isLoadingMore || !_hasMore) return;
+
+    final reqId = _loadRequestId;
+    final requestedTab = _currentTab;
 
     setState(() {
       _isLoadingMore = true;
@@ -190,6 +198,7 @@ class _BookingScreenState extends State<BookingScreen> {
     try {
       final token = _storage.getToken();
       if (token == null) {
+        if (!mounted) return;
         setState(() => _isLoadingMore = false);
         return;
       }
@@ -199,11 +208,14 @@ class _BookingScreenState extends State<BookingScreen> {
       final response = await _repo.getBookingsPage(
         token,
         page: nextPage,
-        tab: _currentTab,
+        tab: requestedTab,
         search: searchText.isNotEmpty ? searchText : null,
         bookingType: _selectedBookingType,
         vehicleAvailability: _selectedVehicleAvailability,
       );
+
+      // Discard if user switched tabs or triggered a fresh load while paginating
+      if (reqId != _loadRequestId || !mounted) return;
 
       setState(() {
         _allBookings.addAll(response.bookings);
@@ -213,6 +225,7 @@ class _BookingScreenState extends State<BookingScreen> {
         _isLoadingMore = false;
       });
     } catch (e) {
+      if (reqId != _loadRequestId || !mounted) return;
       setState(() {
         _isLoadingMore = false;
       });
@@ -1140,6 +1153,28 @@ class _BookingScreenState extends State<BookingScreen> {
                     ),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // Priority info - show for all tabs except New (index 1)
+          if (selectedTabIndex != 1 && booking.driverDetails.priority != null) ...[
+            SizedBox(height: height * 0.015),
+            Row(
+              children: [
+                Icon(
+                  Icons.low_priority_rounded,
+                  size: width * 0.045,
+                  color: Colors.grey.shade700,
+                ),
+                SizedBox(width: width * 0.02),
+                Text(
+                  'Priority: ${booking.driverDetails.priority.toString()}',
+                  style: TextStyle(
+                    fontSize: width * 0.038,
+                    color: Colors.grey.shade700,
                   ),
                 ),
               ],

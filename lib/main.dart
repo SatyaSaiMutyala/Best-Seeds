@@ -1,5 +1,7 @@
 import 'package:bestseeds/driver/services/background_location_service.dart';
 import 'package:bestseeds/driver/services/tracking_work_manager.dart';
+import 'package:bestseeds/services/notification_service.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:bestseeds/routes/app_routes.dart';
@@ -10,6 +12,13 @@ late SharedPreferences prefs;
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   prefs = await SharedPreferences.getInstance();
+
+  // Initialize Firebase
+  await Firebase.initializeApp();
+
+  // Initialize push notification service (FCM + local notifications)
+  final notificationService = NotificationService();
+  await notificationService.initialize();
 
   // Initialize background location service (creates notification channel,
   // registers the isolate entry point). Does NOT start tracking.
@@ -31,7 +40,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return GetMaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Bestseed Drive',
+      title: 'Drive Bestseed',
       theme: ThemeData(
         useMaterial3: true,
         fontFamily: 'Roboto',

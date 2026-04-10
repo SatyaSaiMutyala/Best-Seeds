@@ -1,7 +1,9 @@
 import 'package:bestseeds/driver/models/driver_booking_model.dart';
 import 'package:bestseeds/driver/models/driver_model.dart';
 import 'package:bestseeds/driver/repository/driver_auth_repository.dart';
+import 'package:bestseeds/driver/services/background_location_service.dart';
 import 'package:bestseeds/driver/services/driver_storage_service.dart';
+import 'package:bestseeds/driver/services/tracking_alert_service.dart';
 import 'package:bestseeds/routes/app_routes.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:flutter/material.dart';
@@ -83,6 +85,8 @@ class DriverProfileController extends GetxController {
         return;
       }
 
+      TrackingAlertService.stop();
+      await BackgroundLocationService.stop();
       final token = _storage.getToken();
       if (token != null) {
         await _repo.logout(token);
@@ -91,6 +95,8 @@ class DriverProfileController extends GetxController {
       Get.offAllNamed(AppRoutes.login);
     } catch (e) {
       // Even if API fails, clear local storage and logout
+      TrackingAlertService.stop();
+      await BackgroundLocationService.stop();
       await _storage.logout();
       Get.offAllNamed(AppRoutes.login);
     } finally {

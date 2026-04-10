@@ -2,6 +2,7 @@ import 'package:bestseeds/widgets/location_selector_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:bestseeds/utils/app_snackbar.dart';
 
 /// Screen shown after login to select/confirm user location
 /// Used by both Driver and Employee login flows
@@ -23,6 +24,7 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
   bool _isLoading = false;
   bool _isContinuing = false;
   LocationData? _selectedLocation;
+  String? _locationError;
 
   @override
   void initState() {
@@ -34,57 +36,134 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
   Future<void> _getCurrentLocation() async {
     setState(() {
       _isLoading = true;
+      _locationError = null;
     });
 
     try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _locationError = 'Location service is off';
+          });
+        }
+        AppSnackbar.error('Location service is off. Please turn on GPS and try again.');
+        return;
+      }
+
       // Check location permission
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          setState(() {
-            _isLoading = false;
-          });
+          if (mounted) {
+            setState(() {
+              _isLoading = false;
+              _locationError = 'Location permission denied';
+            });
+          }
+          AppSnackbar.error('Location permission denied');
           return;
         }
       }
 
       if (permission == LocationPermission.deniedForever) {
-        setState(() {
-          _isLoading = false;
-        });
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _locationError = 'Location permission denied forever';
+          });
+        }
+        AppSnackbar.error(
+          'Location permission is permanently denied. Please enable it from app settings.',
+        );
         return;
       }
 
-      final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      Position? position = await Geolocator.getLastKnownPosition();
 
-      // Get address from coordinates
-      String address = await _getAddressFromCoordinates(
-        position.latitude,
-        position.longitude,
-      );
+      if (position == null) {
+        try {
+          position = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.medium,
+            timeLimit: const Duration(seconds: 20),
+          );
+        } catch (e) {
+          debugPrint('getCurrentPosition failed: $e');
+        }
+      }
 
+      if (position == null) {
+        try {
+          position = await Geolocator.getPositionStream(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.medium,
+              distanceFilter: 0,
+            ),
+          ).first.timeout(const Duration(seconds: 20));
+        } catch (e) {
+          debugPrint('getPositionStream failed: $e');
+        }
+      }
+
+      if (position == null) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _locationError = 'Could not fetch current location';
+          });
+        }
+        AppSnackbar.error(
+          'Could not fetch current location. Please open Maps once or move outdoors, then try again.',
+        );
+        return;
+      }
+
+      final currentPosition = position;
+
+      if (!mounted) return;
       setState(() {
         _selectedLocation = LocationData(
-          latitude: position.latitude,
-          longitude: position.longitude,
-          address: address,
+          latitude: currentPosition.latitude,
+          longitude: currentPosition.longitude,
+          address:
+              'Lat: ${currentPosition.latitude.toStringAsFixed(4)}, Lng: ${currentPosition.longitude.toStringAsFixed(4)}',
         );
         _isLoading = false;
+        _locationError = null;
+      });
+
+      final address = await _getAddressFromCoordinates(
+        currentPosition.latitude,
+        currentPosition.longitude,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _selectedLocation = LocationData(
+          latitude: currentPosition.latitude,
+          longitude: currentPosition.longitude,
+          address: address,
+        );
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _isLoading = false;
+        _locationError = 'Failed to get location';
       });
       debugPrint('Error getting location: $e');
+      AppSnackbar.error('Failed to get location. Please check GPS and try again.');
     }
   }
 
   Future<String> _getAddressFromCoordinates(double lat, double lng) async {
     try {
-      final placemarks = await placemarkFromCoordinates(lat, lng);
+      final placemarks = await placemarkFromCoordinates(
+        lat,
+        lng,
+      ).timeout(const Duration(seconds: 10));
       if (placemarks.isNotEmpty) {
         final place = placemarks.first;
         List<String> parts = [];
@@ -258,6 +337,49 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
                             ],
                           ),
                         )
+                      else if (_locationError != null && _selectedLocation == null)
+                        Container(
+                          width: double.infinity,
+                          padding: EdgeInsets.all(width * 0.04),
+                          margin: EdgeInsets.only(bottom: height * 0.02),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.shade50,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.orange.shade200),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    Icons.location_searching,
+                                    color: Colors.orange.shade800,
+                                  ),
+                                  SizedBox(width: width * 0.02),
+                                  Expanded(
+                                    child: Text(
+                                      'We could not detect your current GPS location.',
+                                      style: TextStyle(
+                                        fontSize: width * 0.038,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.orange.shade900,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              SizedBox(height: height * 0.01),
+                              Text(
+                                'You can try again or choose your location from the map.',
+                                style: TextStyle(
+                                  fontSize: width * 0.035,
+                                  color: Colors.orange.shade900,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
                       else if (_selectedLocation != null)
                         Container(
                           padding: EdgeInsets.all(width * 0.04),
@@ -325,26 +447,7 @@ class _LoginLocationScreenState extends State<LoginLocationScreen> {
                             ),
                           ),
                         ),
-                      ),
-                      // SizedBox(height: height * 0.015),
-
-                      /// Select from Map Button
-                      // SizedBox(
-                      //   width: double.infinity,
-                      //   height: height * 0.06,
-                      //   child: OutlinedButton.icon(
-                      //     onPressed: _isLoading ? null : _selectFromMap,
-                      //     icon: const Icon(Icons.map_outlined),
-                      //     label: const Text('Select from Map'),
-                      //     style: OutlinedButton.styleFrom(
-                      //       foregroundColor: const Color(0xFF0077C8),
-                      //       side: const BorderSide(color: Color(0xFF0077C8)),
-                      //       shape: RoundedRectangleBorder(
-                      //         borderRadius: BorderRadius.circular(14),
-                      //       ),
-                      //     ),
-                      //   ),
-                      // ),
+                      ),    
                       SizedBox(height: height * 0.025),
 
                       /// Continue Button

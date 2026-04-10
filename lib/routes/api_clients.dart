@@ -9,6 +9,16 @@ import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
 
+/// Thrown when the backend rejects a driver login because the driver is
+/// currently in an active journey on another device. The auth controller
+/// catches this and shows a blocking dialog instead of a generic error.
+class DriverInJourneyException implements Exception {
+  final String message;
+  DriverInJourneyException(this.message);
+  @override
+  String toString() => message;
+}
+
 class ApiClient {
   /// Extracts error message from Laravel API response
   /// Handles various error formats:
@@ -43,6 +53,15 @@ class ApiClient {
     }
 
     return 'Something went wrong';
+  }
+
+  /// Force logout when driver logged in on another device (401 = token revoked)
+  /// Silent — no messages, just kick to login screen immediately.
+  void _handleForceLogout() {
+    StorageService().logout();
+    DriverStorageService().logout();
+    BackgroundLocationService.stop();
+    Get.offAllNamed(AppRoutes.login);
   }
 
   /// Force logout when admin deactivates the vendor/driver account
@@ -146,9 +165,24 @@ class ApiClient {
       print('API CLIENT: Parsed Response -> $data');
       return data;
     } else {
+      // 401 = token revoked (driver logged in on another device)
+      // Force logout so only the latest device stays active.
+      if (response.statusCode == 401) {
+        _handleForceLogout();
+      }
+
       // Check if account was deactivated by admin
       if (response.statusCode == 403 && data['account_inactive'] == true) {
         _handleAccountDeactivated(data['message'] ?? 'Your account has been deactivated.');
+      }
+
+      // Driver is in active journey on another device → typed exception so
+      // the auth controller can show a blocking dialog instead of a snackbar.
+      if (data is Map && data['error_code'] == 'DRIVER_IN_JOURNEY') {
+        throw DriverInJourneyException(
+          data['message']?.toString() ??
+              'You are currently in an active journey on another device.',
+        );
       }
       print('API CLIENT ERROR: $data');
 
@@ -234,6 +268,11 @@ class ApiClient {
       print('API CLIENT MULTIPART: Parsed Response -> $data');
       return data;
     } else {
+      // 401 = token revoked (driver logged in on another device)
+      if (response.statusCode == 401) {
+        _handleForceLogout();
+      }
+
       // Check if account was deactivated by admin
       if (response.statusCode == 403 && data['account_inactive'] == true) {
         _handleAccountDeactivated(data['message'] ?? 'Your account has been deactivated.');

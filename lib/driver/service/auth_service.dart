@@ -489,6 +489,30 @@ class AuthService {
     );
   }
 
+  // ==================== Tracking Alert Status API ====================
+
+  Future<Map<String, dynamic>> getTrackingAlertStatus({
+    required String token,
+  }) async {
+    return await _apiClient.request(
+      url: AppConstants.baseUrl + AppConstants.vendorTrackingAlertStatusApi,
+      method: 'GET',
+      token: token,
+      body: {},
+    );
+  }
+
+  Future<Map<String, dynamic>> markTrackingAlertsRead({
+    required String token,
+  }) async {
+    return await _apiClient.request(
+      url: AppConstants.baseUrl + AppConstants.vendorTrackingAlertsMarkReadApi,
+      method: 'POST',
+      token: token,
+      body: {},
+    );
+  }
+
   // ==================== FCM Token Registration ====================
 
   Future<Map<String, dynamic>> registerDriverFcmToken({

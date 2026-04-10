@@ -1,6 +1,10 @@
 import 'package:bestseeds/driver/models/driver_model.dart';
 import 'package:bestseeds/driver/repository/driver_auth_repository.dart';
+import 'package:bestseeds/driver/services/background_location_service.dart';
 import 'package:bestseeds/driver/services/driver_storage_service.dart';
+import 'package:bestseeds/driver/services/tracking_alert_service.dart';
+import 'package:bestseeds/routes/api_clients.dart';
+import 'package:bestseeds/services/notification_service.dart';
 import 'package:bestseeds/routes/app_routes.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:bestseeds/widgets/login_location_screen.dart';
@@ -55,6 +59,9 @@ class DriverAuthController extends GetxController {
       await _storage.saveDriver(driver);
       print('Controller: Driver saved, navigating to location setup');
 
+      // Register FCM token with backend
+      NotificationService().registerDriverToken();
+
       // Navigate to location setup screen
       Get.offAll(() => LoginLocationScreen(
             userType: 'driver',
@@ -85,12 +92,45 @@ class DriverAuthController extends GetxController {
               Get.offAllNamed(AppRoutes.driverHome);
             },
           ));
+    } on DriverInJourneyException catch (e) {
+      // Old device is mid-journey — block this login and tell the user.
+      // No navigation, no token saved; the existing device keeps its session.
+      print('Controller: Driver in journey on another device — blocking login');
+      _showInJourneyDialog(e.message);
     } catch (e) {
       print('Controller ERROR: $e');
       AppSnackbar.error(extractErrorMessage(e));
     } finally {
       isLoading.value = false;
     }
+  }
+
+  void _showInJourneyDialog(String message) {
+    Get.dialog(
+      PopScope(
+        canPop: false,
+        child: AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          title: const Text(
+            'Already Logged In',
+            style: TextStyle(fontWeight: FontWeight.w700),
+          ),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Get.back(),
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFF0077C8),
+              ),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      ),
+      barrierDismissible: false,
+    );
   }
 
   Future<void> resendOtp() async {
@@ -128,6 +168,8 @@ class DriverAuthController extends GetxController {
   Future<void> logout() async {
     try {
       isLoading.value = true;
+      TrackingAlertService.stop();
+      await BackgroundLocationService.stop();
       final token = _storage.getToken();
       if (token != null) {
         await _repo.logout(token);

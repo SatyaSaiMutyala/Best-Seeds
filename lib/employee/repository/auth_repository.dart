@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:bestseeds/driver/models/user_model.dart';
 import 'package:bestseeds/driver/service/auth_service.dart';
 import 'package:bestseeds/employee/models/booking_model.dart';
+import 'package:bestseeds/employee/models/tracking_alert_model.dart';
 import 'package:bestseeds/employee/services/booking_cache_service.dart';
 
 class AuthRepository {
@@ -247,6 +248,19 @@ class AuthRepository {
       longitude: longitude,
       address: address,
     );
+  }
+
+  Future<TrackingAlertResponse> getTrackingAlertStatus({
+    required String token,
+  }) async {
+    final res = await _service.getTrackingAlertStatus(token: token);
+    return TrackingAlertResponse.fromJson(res);
+  }
+
+  Future<void> markTrackingAlertsRead({
+    required String token,
+  }) async {
+    await _service.markTrackingAlertsRead(token: token);
   }
 }
 

@@ -34,6 +34,15 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
   // Default location (Hyderabad, India)
   static const LatLng _defaultLocation = LatLng(17.3850, 78.4867);
+  static const Duration _liveTrackingPollInterval = Duration(seconds: 10);
+  static const Duration _routeRefreshInterval = Duration(minutes: 5);
+  static const Duration _rerouteCooldown = Duration(minutes: 2);
+  static const Duration _markerAnimationStepDuration = Duration(
+    milliseconds: 50,
+  );
+  static const int _markerAnimationSteps = 20;
+  static const double _polylineRerouteThresholdMeters = 750;
+  static const double _timelinePointMinDistanceMeters = 15;
 
   late CameraPosition _initialPosition;
   late LatLng _currentVehiclePosition;
@@ -66,6 +75,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   LatLng? _pickupLatLng;
   LatLng? _currentLatLng;
   LatLng? _destinationLatLng;
+  LatLng? _lastVehicleMarkerLatLng;
+  double _lastVehicleBearing = 0;
 
   // Tracking data
   TrackingData? _trackingData;
@@ -106,6 +117,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   bool _isRefreshing = false;
   Timer? _timeAgoTimer;
   Timer? _autoRefreshTimer;
+  Timer? _liveTrackingTimer;
+  Timer? _markerAnimationTimer;
+  DateTime? _lastRouteRefreshAt;
 
   // Pulse animation for vehicle icon
   late AnimationController _pulseController;
@@ -130,10 +144,16 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     _timeAgoTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
-    // Auto-refresh tracking data and ETA every 2 minutes
-    _autoRefreshTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+    // Refresh only the marker/live position frequently (every 10s).
+    _liveTrackingTimer = Timer.periodic(_liveTrackingPollInterval, (_) {
       if (mounted && !_isRefreshing) {
         _refreshData();
+      }
+    });
+    // Rebuild route shape rarely (every 5min), or sooner if off-route.
+    _autoRefreshTimer = Timer.periodic(_routeRefreshInterval, (_) {
+      if (mounted && !_isRefreshing) {
+        _refreshData(forceRouteRefresh: true);
       }
     });
   }
@@ -149,11 +169,14 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       bookingId: widget.bookingId,
     );
 
-    if (response['status'] != true || response['data'] == null) {
+    if (response['status'] != true) {
       throw Exception(response['message']?.toString() ?? 'No tracking data found');
     }
 
     final parsed = SpecificVehicleTrackingResponse.fromJson(response);
+    if (parsed.data == null) {
+      throw Exception('No tracking data found');
+    }
     _trackingData = parsed.data;
   }
 
@@ -198,13 +221,14 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     }
   }
 
-  Future<void> _refreshData() async {
+  Future<void> _refreshData({bool forceRouteRefresh = false}) async {
     if (_isRefreshing) return;
     setState(() => _isRefreshing = true);
 
     try {
       final oldPickup = _trackingData?.pickup;
       final oldDrop = _trackingData?.drop;
+      final previousVehiclePosition = _currentLatLng;
       await _fetchTrackingData();
       final newData = _trackingData;
 
@@ -216,8 +240,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           _currentVehiclePosition = LatLng(driverLoc.lat, driverLoc.lng);
           _currentLatLng = LatLng(driverLoc.lat, driverLoc.lng);
         }
-
-        setState(() => _isLoadingRoute = true);
 
         // Check if route endpoints changed (rare — usually only driver moves)
         final routeChanged = oldPickup?.name != newData.pickup.name ||
@@ -251,14 +273,40 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
           await _setupMarkersAndPolylines();
         } else {
-          // Silent update — just move vehicle marker, update ETA & passed stops
-          _buildMarkers();
+          // Silent update — only move vehicle marker, keep existing polylines
+          if (previousVehiclePosition != null && _currentLatLng != null) {
+            _animateVehicleMarker(previousVehiclePosition, _currentLatLng!);
+          } else {
+            _buildMarkers();
+          }
 
           // Update driver location timestamp for route start recalculation
           if (driverLoc.updatedAt != null && driverLoc.updatedAt!.isNotEmpty) {
             try {
               _routeStartTime = DateTime.parse(driverLoc.updatedAt!);
             } catch (_) {}
+          }
+
+          // ── REROUTE DETECTION ──
+          // If driver deviated >750m from polyline, recalculate route.
+          if (_currentLatLng != null &&
+              _shouldRefreshRoute(forceRefresh: forceRouteRefresh)) {
+            final polylinePoints = _polylines
+                .where((p) => p.polylineId.value != 'completed')
+                .expand((p) => p.points)
+                .toList();
+            final deviation = _minDistanceToPolyline(
+              _currentLatLng!,
+              polylinePoints,
+            );
+            if (forceRouteRefresh ||
+                deviation > _polylineRerouteThresholdMeters) {
+              debugPrint(
+                'Driver deviated ${deviation.toStringAsFixed(0)}m from '
+                'polyline — recalculating route',
+              );
+              await _setupMarkersAndPolylines();
+            }
           }
 
           // Check if driver reached the next stop (sequential progression)
@@ -300,6 +348,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   }
 
   Future<void> _setupMarkersAndPolylines() async {
+    _lastRouteRefreshAt = DateTime.now();
     if (_trackingData == null) return;
 
     final pickup = _trackingData!.pickup;
@@ -566,6 +615,190 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     if (_currentLatLng != null) _updateProgress(_currentLatLng!);
   }
 
+  // ── REROUTE DETECTION HELPER ──
+  bool _shouldRefreshRoute({bool forceRefresh = false}) {
+    if (forceRefresh) return true;
+    if (_lastRouteRefreshAt == null) return true;
+    return DateTime.now().difference(_lastRouteRefreshAt!) >= _rerouteCooldown;
+  }
+
+  // ── BUILD COMPLETED POLYLINE FROM TIMELINE POINTS ──
+  List<LatLng> _buildCompletedTimelinePolyline({
+    List<LatLng> fallbackPoints = const [],
+  }) {
+    final points = <LatLng>[];
+
+    if (_pickupLatLng != null) {
+      points.add(_pickupLatLng!);
+    }
+
+    if (_trackingData != null) {
+      for (final item in _trackingData!.timeline) {
+        if (item.lat == null || item.lng == null) continue;
+        final nextPoint = LatLng(item.lat!, item.lng!);
+        if (points.isEmpty ||
+            _haversineDistance(points.last, nextPoint) >=
+                _timelinePointMinDistanceMeters) {
+          points.add(nextPoint);
+        }
+      }
+    }
+
+    if (_currentLatLng != null &&
+        (points.isEmpty ||
+            _haversineDistance(points.last, _currentLatLng!) >=
+                _timelinePointMinDistanceMeters)) {
+      points.add(_currentLatLng!);
+    }
+
+    if (points.length >= 2) return points;
+    if (fallbackPoints.isNotEmpty) return fallbackPoints;
+    if (_pickupLatLng != null && _currentLatLng != null) {
+      return [_pickupLatLng!, _currentLatLng!];
+    }
+    return points;
+  }
+
+  /// Splits the existing road-following polyline at the driver's current
+  /// position into completed (green) and remaining (blue) segments.
+  /// No API call needed — uses the cached `_fullPolyline` from Directions API.
+  void _refreshCompletedPolylineFromTimeline() {
+    if (_currentLatLng == null) return;
+
+    // If we have a road-following polyline, split it at the driver position
+    if (_fullPolyline.length >= 2) {
+      final splitIndex = _getClosestPolylineIndex(_currentLatLng!);
+
+      final completedPoints = _fullPolyline.sublist(0, splitIndex + 1);
+      final remainingPoints = _fullPolyline.sublist(splitIndex);
+
+      if (completedPoints.isNotEmpty) {
+        completedPoints.add(_currentLatLng!);
+      }
+      if (remainingPoints.isNotEmpty) {
+        remainingPoints.insert(0, _currentLatLng!);
+      }
+
+      if (completedPoints.length < 2 && remainingPoints.length < 2) return;
+
+      final updatedPolylines = _polylines
+          .where((p) =>
+              p.polylineId.value != 'completed' &&
+              p.polylineId.value != 'remaining')
+          .toSet();
+
+      if (completedPoints.length >= 2) {
+        updatedPolylines.add(
+          Polyline(
+            polylineId: const PolylineId('completed'),
+            points: completedPoints,
+            color: Colors.green,
+            width: 5,
+          ),
+        );
+      }
+      if (remainingPoints.length >= 2) {
+        updatedPolylines.add(
+          Polyline(
+            polylineId: const PolylineId('remaining'),
+            points: remainingPoints,
+            color: const Color(0xFF0077C8),
+            width: 4,
+            patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+          ),
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _polylines = updatedPolylines;
+      });
+      return;
+    }
+
+    // Fallback: straight line from timeline points
+    final completedRoute = _buildCompletedTimelinePolyline();
+    if (completedRoute.length < 2) return;
+
+    final updatedPolylines = _polylines
+        .where((polyline) => polyline.polylineId.value != 'completed')
+        .toSet();
+    updatedPolylines.add(
+      Polyline(
+        polylineId: const PolylineId('completed'),
+        points: completedRoute,
+        color: Colors.green,
+        width: 5,
+      ),
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _polylines = updatedPolylines;
+    });
+  }
+
+  // ── SMOOTH MARKER ANIMATION (Uber-like) ──
+  // Cubic ease-in-out for smooth acceleration/deceleration
+  double _easeInOutCubic(double t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - ((-2 * t + 2) * (-2 * t + 2) * (-2 * t + 2)) / 2;
+  }
+
+  void _animateVehicleMarker(LatLng from, LatLng to) {
+    _markerAnimationTimer?.cancel();
+
+    if (_haversineDistance(from, to) < 2) {
+      _buildMarkers();
+      if (mounted) setState(() {});
+      return;
+    }
+
+    // Calculate target bearing for smooth rotation
+    final startBearing = _lastVehicleBearing;
+    final endBearing = _getBearing(from, to);
+
+    int step = 0;
+    _markerAnimationTimer = Timer.periodic(_markerAnimationStepDuration, (timer) {
+      step++;
+      final linearT = step / _markerAnimationSteps;
+      final easedT = _easeInOutCubic(linearT);
+
+      // Smooth position interpolation with easing
+      _currentLatLng = LatLng(
+        from.latitude + (to.latitude - from.latitude) * easedT,
+        from.longitude + (to.longitude - from.longitude) * easedT,
+      );
+
+      // Smooth bearing interpolation (shortest rotation path)
+      double bearingDiff = endBearing - startBearing;
+      if (bearingDiff > 180) bearingDiff -= 360;
+      if (bearingDiff < -180) bearingDiff += 360;
+      _lastVehicleBearing = (startBearing + bearingDiff * easedT) % 360;
+
+      _buildMarkers();
+      if (mounted) setState(() {});
+
+      if (step >= _markerAnimationSteps) {
+        timer.cancel();
+        _currentLatLng = to;
+        _lastVehicleBearing = endBearing;
+        _buildMarkers();
+        if (mounted) setState(() {});
+      }
+    });
+  }
+
+  // ── MIN DISTANCE FROM POINT TO POLYLINE ──
+  double _minDistanceToPolyline(LatLng point, List<LatLng> polyline) {
+    if (polyline.isEmpty) return double.infinity;
+    double minDist = double.infinity;
+    for (final p in polyline) {
+      final d = _haversineDistance(point, p);
+      if (d < minDist) minDist = d;
+    }
+    return minDist;
+  }
+
   double _getBearing(LatLng start, LatLng end) {
     double lat1 = start.latitude * pi / 180;
     double lon1 = start.longitude * pi / 180;
@@ -615,6 +848,28 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     return _getBearing(start, end);
   }
 
+  void _updateVehicleBearing(LatLng? previous, LatLng? current) {
+    if (previous == null || current == null) return;
+    if (_haversineDistance(previous, current) < 2) return;
+    _lastVehicleBearing = _getBearing(previous, current);
+  }
+
+  double _getVehicleBearing() {
+    if (_lastVehicleMarkerLatLng != null && _currentLatLng != null) {
+      _updateVehicleBearing(_lastVehicleMarkerLatLng, _currentLatLng);
+    }
+
+    if (_lastVehicleBearing != 0) {
+      return _lastVehicleBearing;
+    }
+
+    if (_currentLatLng != null && _fullPolyline.isNotEmpty) {
+      return _getRouteBearing(_currentLatLng!);
+    }
+
+    return 0;
+  }
+
   /// Build markers for both small and expanded map views
   void _buildMarkers() {
     if (_trackingData == null) return;
@@ -653,9 +908,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
     /// -------- Vehicle (ONLY ONCE) --------
     if (_currentLatLng != null) {
-      final rotationAngle = _fullPolyline.isNotEmpty
-          ? _getRouteBearing(_currentLatLng!)
-          : 0.0;
+      final rotationAngle = _getVehicleBearing();
 
       smallMarkers.add(
         Marker(
@@ -715,6 +968,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
     _smallMapMarkers = smallMarkers;
     _expandedMapMarkers = expandedMarkers;
+    _lastVehicleMarkerLatLng = _currentLatLng;
   }
 
   /// Calculate initial camera position to show the full route
@@ -2995,6 +3249,8 @@ for (var stop in stops) {
     _pulseController.dispose();
     _timeAgoTimer?.cancel();
     _autoRefreshTimer?.cancel();
+    _liveTrackingTimer?.cancel();
+    _markerAnimationTimer?.cancel();
     _smallMapController?.dispose();
     _expandedMapController?.dispose();
     super.dispose();

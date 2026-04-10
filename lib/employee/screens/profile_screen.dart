@@ -1,8 +1,8 @@
 import 'package:bestseeds/employee/controllers/profile_controller.dart';
 import 'package:bestseeds/employee/screens/employee_main_nav_screen.dart';
 import 'package:bestseeds/employee/screens/help_screen.dart';
+import 'package:bestseeds/employee/screens/notification_screen.dart';
 import 'package:bestseeds/routes/app_routes.dart';
-import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:bestseeds/widgets/profile_menu_item.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -34,7 +34,12 @@ class EmployeeProfileScreen extends StatelessWidget {
                       icon: Icons.notifications_outlined,
                       title: 'Notification',
                       onTap: () {
-                        AppSnackbar.info('Notifications', 'No notifications found');
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const EmployeeNotificationScreen(),
+                          ),
+                        );
                       },
                     ),
                     ProfileMenuItem(

@@ -2,6 +2,7 @@ import 'package:bestseeds/driver/models/user_model.dart';
 import 'package:bestseeds/employee/repository/auth_repository.dart';
 import 'package:bestseeds/employee/services/storage_service.dart';
 import 'package:bestseeds/routes/app_routes.dart';
+import 'package:bestseeds/services/notification_service.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:bestseeds/widgets/login_location_screen.dart';
 import 'package:flutter/material.dart';
@@ -34,6 +35,9 @@ class AuthController extends GetxController {
 
       final user = result as User;
       await _storage.saveUser(user);
+
+      // Register FCM token with backend
+      NotificationService().registerEmployeeToken();
 
       // Navigate to location setup screen
       Get.offAll(() => LoginLocationScreen(

@@ -1,3 +1,4 @@
+import 'package:bestseeds/employee/controllers/notification_controller.dart';
 import 'package:bestseeds/employee/screens/booking_screen.dart';
 import 'package:bestseeds/employee/screens/custom_bottom_nav_bar.dart';
 import 'package:bestseeds/employee/screens/employee_home_screen.dart';
@@ -37,6 +38,7 @@ class _EmployeeMainNavigationScreenState
   @override
   Widget build(BuildContext context) {
     final navController = Get.put(EmployeeNavController());
+    Get.put(EmployeeNotificationController());
 
     final List<Widget> screens = [
       const EmployeeDashboard(),

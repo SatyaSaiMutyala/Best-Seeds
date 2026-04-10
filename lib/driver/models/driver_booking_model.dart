@@ -158,6 +158,38 @@ class DriverRoute {
     return bookings.map((b) => b.id.toString()).join(', ');
   }
 
+  /// Per-booking pieces breakdown for the route info chip.
+  /// One booking → "1200 pcs"
+  /// Multiple bookings → "1200 pcs (217), 2000 pcs (218)"
+  /// The aggregate `totalPieces` is no longer enough on its own when
+  /// the driver wants to know which booking carries which load.
+  String get piecesByBookingString {
+    if (bookings.isEmpty) return '0 pcs';
+    if (bookings.length == 1) {
+      return '${bookings.first.noOfPieces} pcs';
+    }
+    return bookings
+        .map((b) => '${b.noOfPieces} pcs (${b.id})')
+        .join(', ');
+  }
+
+  /// Per-booking category breakdown for the route info chip.
+  /// One booking → "syaqua"
+  /// Multiple bookings → "syaqua (217), hyderline (218)"
+  /// Falls back to the route-level `categoryName` when the per-booking
+  /// values aren't available (older API responses).
+  String get categoriesByBookingString {
+    if (bookings.isEmpty) return categoryName;
+    final withCategory = bookings
+        .where((b) => (b.categoryName ?? '').isNotEmpty)
+        .toList();
+    if (withCategory.isEmpty) return categoryName;
+    if (withCategory.length == 1) return withCategory.first.categoryName!;
+    return withCategory
+        .map((b) => '${b.categoryName} (${b.id})')
+        .join(', ');
+  }
+
   /// Get the first available delivery datetime from bookings
   DateTime? get firstDeliveryDatetime {
     for (final booking in bookings) {
@@ -219,6 +251,12 @@ class DropBooking {
   final String? deliveryNote;
   final DateTime? deliveryDatetime;
   final int? priority;
+  // Per-booking category. Bookings grouped into the same route can
+  // belong to different categories (e.g. one is "syaqua" and another
+  // "hyderline"), so the route-level category isn't enough — the
+  // driver home screen needs the per-booking value to render
+  // separate chips like "syaqua (217)", "hyderline (218)".
+  final String? categoryName;
 
   DropBooking({
     required this.id,
@@ -233,6 +271,7 @@ class DropBooking {
     this.deliveryNote,
     this.deliveryDatetime,
     this.priority,
+    this.categoryName,
   });
 
   factory DropBooking.fromJson(Map<String, dynamic> json) {
@@ -251,6 +290,7 @@ class DropBooking {
           ? DateTime.tryParse(json['delivery_datetime'])
           : null,
       priority: json['priority'],
+      categoryName: json['category_name'],
     );
   }
 

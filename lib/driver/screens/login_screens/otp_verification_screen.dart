@@ -119,7 +119,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
                               SizedBox(height: height * 0.07),
                               Center(
                                 child: Text(
-                                  'Verify Your\nMobile Number',
+                                  'Verify Your Mobile Number',
                                   style: TextStyle(
                                     color: Colors.white,
                                     fontSize: width * 0.07,
@@ -132,7 +132,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
                               SizedBox(height: height * 0.02),
                               Center(
                                 child: Obx(() => Text(
-                                      'We have sent a 6-digit OTP to\n${controller.mobile.value}',
+                                      'We have sent a 6-digit OTP to ${controller.mobile.value}',
                                       style: TextStyle(
                                         color: Colors.white70,
                                         fontSize: width * 0.04,
@@ -148,7 +148,7 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
                           width: double.infinity,
                           padding: EdgeInsets.symmetric(
                             horizontal: width * 0.06,
-                            vertical: height * 0.035,
+                            vertical: height * 0.090,
                           ),
                           decoration: const BoxDecoration(
                             color: Colors.white,

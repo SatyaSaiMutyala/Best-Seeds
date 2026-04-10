@@ -8,6 +8,7 @@ import 'package:bestseeds/driver/screens/drop_location_bottomsheet.dart';
 import 'package:bestseeds/driver/screens/profile_screen.dart';
 import 'package:bestseeds/driver/services/background_location_service.dart';
 import 'package:bestseeds/driver/services/driver_storage_service.dart';
+import 'package:bestseeds/driver/services/tracking_alert_service.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
 import 'package:bestseeds/widgets/refresh_button.dart';
 import 'package:bestseeds/widgets/route_visualization.dart';
@@ -72,6 +73,7 @@ class _DriverDashboardState extends State<DriverDashboard>
     _fetchBookings();
     _checkActiveJourney();
     _requestNotificationPermission();
+    TrackingAlertService.start();
   }
 
   /// Request notification permission early (on app open) so alert sounds work.
@@ -967,21 +969,27 @@ class _DriverDashboardState extends State<DriverDashboard>
                 ),
                 const SizedBox(height: 6),
                 // Info chips row
-                Row(
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
                   children: [
                     _infoChip(Icons.tag_rounded,
                         route.bookingIdsString, Colors.grey.shade700),
-                    const SizedBox(width: 8),
+                    // Pieces chip — for multi-booking routes shows
+                    // a per-booking breakdown like
+                    // "1200 pcs (217), 2000 pcs (218)" so the driver
+                    // knows which booking carries which load.
+                    // Single-booking routes still show just "1200 pcs".
                     _infoChip(Icons.inventory_2_outlined,
-                        '${route.totalPieces} pcs', Colors.grey.shade700),
-                    const SizedBox(width: 8),
+                        route.piecesByBookingString, Colors.grey.shade700),
                     _infoChip(Icons.place_outlined,
                         '${route.totalDrops} drops', Colors.grey.shade700),
-                    if (route.categoryName.isNotEmpty) ...[
-                      const SizedBox(width: 8),
+                    // Category chip — same per-booking breakdown when
+                    // bookings on a route belong to different categories
+                    // (e.g. "syaqua (217), hyderline (218)").
+                    if (route.categoriesByBookingString.isNotEmpty)
                       _infoChip(Icons.category_outlined,
-                          route.categoryName, Colors.grey.shade700),
-                    ],
+                          route.categoriesByBookingString, Colors.grey.shade700),
                   ],
                 ),
               ],
@@ -1025,32 +1033,26 @@ class _DriverDashboardState extends State<DriverDashboard>
   }
 
   Widget _infoChip(IconData icon, String text, Color color) {
-    return Flexible(
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.8),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 12, color: color),
-            const SizedBox(width: 3),
-            Flexible(
-              child: Text(
-                text,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                  color: color,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.8),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: color),
+          const SizedBox(width: 3),
+          Text(
+            text,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: color,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -1371,36 +1373,36 @@ class _DriverDashboardState extends State<DriverDashboard>
     String? steps;
     if (manufacturer.contains('oneplus') || manufacturer.contains('oppo')) {
       steps = '1. Go to Settings > Battery > Battery Optimization\n'
-          '2. Find "Bestseed Drive" and select "Don\'t Optimize"\n'
-          '3. Also go to Settings > Apps > Bestseed Drive > Battery\n'
+          '2. Find "Drive Bestseed" and select "Don\'t Optimize"\n'
+          '3. Also go to Settings > Apps > Drive Bestseed > Battery\n'
           '4. Enable "Allow Background Activity"\n'
           '5. Disable "Auto-launch manager" restriction if present';
     } else if (manufacturer.contains('realme')) {
       steps = '1. Go to Settings > Battery > App Battery Management\n'
-          '2. Find "Bestseed Drive" and select "Allow Background Activity"\n'
-          '3. Also go to Settings > App Management > Bestseed Drive\n'
+          '2. Find "Drive Bestseed" and select "Allow Background Activity"\n'
+          '3. Also go to Settings > App Management > Drive Bestseed\n'
           '4. Enable "Auto-launch" for this app\n'
           '5. Set Battery Saver to "Unrestricted"';
     } else if (manufacturer.contains('xiaomi') ||
         manufacturer.contains('redmi') ||
         manufacturer.contains('poco')) {
-      steps = '1. Go to Settings > Apps > Manage Apps > Bestseed Drive\n'
+      steps = '1. Go to Settings > Apps > Manage Apps > Drive Bestseed\n'
           '2. Tap "Autostart" and enable it\n'
-          '3. Go to Battery Saver > Bestseed Drive\n'
+          '3. Go to Battery Saver > Drive Bestseed\n'
           '4. Set to "No Restrictions"';
     } else if (manufacturer.contains('samsung')) {
       steps = '1. Go to Settings > Battery > Background Usage Limits\n'
-          '2. Remove "Bestseed Drive" from Sleeping/Deep Sleeping apps\n'
-          '3. Go to Settings > Apps > Bestseed Drive > Battery\n'
+          '2. Remove "Drive Bestseed" from Sleeping/Deep Sleeping apps\n'
+          '3. Go to Settings > Apps > Drive Bestseed > Battery\n'
           '4. Set to "Unrestricted"';
     } else if (manufacturer.contains('vivo')) {
       steps = '1. Go to Settings > Battery > Background Power Consumption\n'
-          '2. Find "Bestseed Drive" and enable "Allow Background Activity"\n'
+          '2. Find "Drive Bestseed" and enable "Allow Background Activity"\n'
           '3. Go to Settings > Apps > Autostart and enable for this app';
     } else if (manufacturer.contains('huawei') ||
         manufacturer.contains('honor')) {
       steps = '1. Go to Settings > Battery > App Launch\n'
-          '2. Find "Bestseed Drive" and set to "Manage Manually"\n'
+          '2. Find "Drive Bestseed" and set to "Manage Manually"\n'
           '3. Enable: Auto-launch, Secondary Launch, Run in Background';
     }
 

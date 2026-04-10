@@ -4,6 +4,7 @@ import 'package:bestseeds/driver/services/driver_storage_service.dart';
 import 'package:bestseeds/employee/repository/auth_repository.dart';
 import 'package:bestseeds/employee/services/storage_service.dart';
 import 'package:bestseeds/routes/app_routes.dart';
+import 'package:bestseeds/services/notification_service.dart';
 import 'package:bestseeds/widgets/login_location_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -32,6 +33,8 @@ class _SplashScreenState extends State<SplashScreen> {
     final employee = await employeeStorage.getUser();
     if (employee != null) {
       print('Splash: Employee found - ${employee.name}');
+      // Register FCM token on auto-login
+      NotificationService().registerEmployeeToken();
 
       // Check if employee has location saved
       if (!employeeStorage.hasLocation()) {
@@ -71,6 +74,10 @@ class _SplashScreenState extends State<SplashScreen> {
       }
 
       Get.offAllNamed(AppRoutes.employeeHome);
+      // Handle pending notification if app was opened from terminated state
+      Future.delayed(const Duration(milliseconds: 500), () {
+        NotificationService.handlePendingNotification();
+      });
       return;
     }
 
@@ -78,47 +85,52 @@ class _SplashScreenState extends State<SplashScreen> {
     final driver = await driverStorage.getDriver();
     if (driver != null) {
       print('Splash: Driver found - ${driver.name}');
-
-      // Restart background location service if it was killed during active journey
-      await BackgroundLocationService.restartIfNeeded();
+      // Register FCM token on auto-login
+      NotificationService().registerDriverToken();
 
       // Check if driver has location saved
-      // if (!driverStorage.hasLocation()) {
-      print('Splash: Driver has no location, navigating to location screen');
-      Get.offAll(() => LoginLocationScreen(
-            userType: 'driver',
-            onLocationSelected: (location) async {
-              // Save location to local storage
-              await driverStorage.saveLocation(
-                latitude: location.latitude,
-                longitude: location.longitude,
-                address: location.address,
-              );
-              print('Splash: Driver location saved locally');
+      if (!driverStorage.hasLocation()) {
+        // Make sure no stale background tracking service interferes with the
+        // login location picker after logout/re-login.
+        await BackgroundLocationService.stop();
 
-              // Save location to backend
-              try {
-                final repo = DriverAuthRepository();
-                await repo.updateCurrentLocation(
-                  token: driver.token,
+        print('Splash: Driver has no location, navigating to location screen');
+        Get.offAll(() => LoginLocationScreen(
+              userType: 'driver',
+              onLocationSelected: (location) async {
+                // Save location to local storage
+                await driverStorage.saveLocation(
                   latitude: location.latitude,
                   longitude: location.longitude,
                   address: location.address,
                 );
-                print('Splash: Driver location saved to backend');
-              } catch (e) {
-                print('Splash: Failed to save driver location to backend: $e');
-              }
+                print('Splash: Driver location saved locally');
 
-              // Navigate to home
-              Get.offAllNamed(AppRoutes.driverHome);
-            },
-          ));
+                // Save location to backend
+                try {
+                  final repo = DriverAuthRepository();
+                  await repo.updateCurrentLocation(
+                    token: driver.token,
+                    latitude: location.latitude,
+                    longitude: location.longitude,
+                    address: location.address,
+                  );
+                  print('Splash: Driver location saved to backend');
+                } catch (e) {
+                  print('Splash: Failed to save driver location to backend: $e');
+                }
+
+                // Navigate to home
+                Get.offAllNamed(AppRoutes.driverHome);
+              },
+            ));
+        return;
+      }
+
+      // Restart background location service if it was killed during active journey
+      await BackgroundLocationService.restartIfNeeded();
+      Get.offAllNamed(AppRoutes.driverHome);
       return;
-      // }
-
-      // Get.offAllNamed(AppRoutes.driverHome);
-      // return;
     }
 
     // No user logged in, go to driver login (default)

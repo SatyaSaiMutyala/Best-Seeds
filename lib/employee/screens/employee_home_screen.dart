@@ -1,7 +1,9 @@
 import 'package:bestseeds/driver/models/user_model.dart';
+import 'package:bestseeds/employee/controllers/notification_controller.dart';
 import 'package:bestseeds/employee/models/booking_model.dart';
 import 'package:bestseeds/employee/repository/auth_repository.dart';
 import 'package:bestseeds/employee/screens/edit_hatchery_details_screen.dart';
+import 'package:bestseeds/employee/screens/notification_screen.dart';
 import 'package:bestseeds/employee/screens/vehicle_tracking_map_screen.dart';
 import 'package:bestseeds/employee/screens/employee_main_nav_screen.dart';
 import 'package:bestseeds/employee/services/storage_service.dart';
@@ -32,6 +34,16 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
   int _currentPage = 1;
   bool _hasMore = true;
   bool _isLoadingMore = false;
+
+  // Request token to discard stale responses when switching tabs quickly
+  int _loadRequestId = 0;
+
+  // Accept/reject in-flight guard. Without this, tapping the Accept
+  // button on a second booking while the first is still awaiting the
+  // API response opens a second loader dialog. The two dialogs end up
+  // unbalanced — one `Get.back()` closes the topmost dialog, the other
+  // sits there forever and the screen looks like an infinite loader.
+  bool _isProcessingBookingAction = false;
 
   // Search and filter
   final TextEditingController _searchController = TextEditingController();
@@ -115,6 +127,10 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
         _selectedBookingType == null &&
         _selectedVehicleAvailability == null;
 
+    // Tag this load so any in-flight responses from a previous tab are ignored
+    final reqId = ++_loadRequestId;
+    final requestedTab = _currentTab;
+
     setState(() {
       _isLoading = true;
       _error = null;
@@ -125,8 +141,9 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
 
     // Load cached data first for instant display
     if (isCacheable) {
-      final cached = await _repo.getCachedBookings(_currentTab);
-      if (cached != null && cached.bookings.isNotEmpty && mounted) {
+      final cached = await _repo.getCachedBookings(requestedTab);
+      if (reqId != _loadRequestId || !mounted) return;
+      if (cached != null && cached.bookings.isNotEmpty) {
         setState(() {
           _allBookings = cached.bookings;
           _allCount = cached.counts.all;
@@ -143,55 +160,55 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
     try {
       final token = _storage.getToken();
       if (token == null) {
-        if (mounted) {
-          setState(() {
-            if (_allBookings.isEmpty) {
-              _error = 'Session expired. Please login again.';
-            }
-            _isLoading = false;
-          });
-        }
+        if (reqId != _loadRequestId || !mounted) return;
+        setState(() {
+          if (_allBookings.isEmpty) {
+            _error = 'Session expired. Please login again.';
+          }
+          _isLoading = false;
+        });
         return;
       }
 
       final response = await _repo.getBookingsPage(
         token,
         page: 1,
-        tab: _currentTab,
+        tab: requestedTab,
         search: searchText.isNotEmpty ? searchText : null,
         bookingType: _selectedBookingType,
         vehicleAvailability: _selectedVehicleAvailability,
       );
-      if (mounted) {
+      if (reqId != _loadRequestId || !mounted) return;
+      setState(() {
+        _allBookings = response.bookings;
+        _allCount = response.counts.all;
+        _newCount = response.counts.newBookings;
+        _currentCount = response.counts.current;
+        _pastCount = response.counts.past;
+        _hasMore =
+            response.pagination.currentPage < response.pagination.lastPage;
+        _currentPage = 1;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (reqId != _loadRequestId || !mounted) return;
+      if (_allBookings.isEmpty) {
         setState(() {
-          _allBookings = response.bookings;
-          _allCount = response.counts.all;
-          _newCount = response.counts.newBookings;
-          _currentCount = response.counts.current;
-          _pastCount = response.counts.past;
-          _hasMore =
-              response.pagination.currentPage < response.pagination.lastPage;
-          _currentPage = 1;
+          _error = extractErrorMessage(e);
           _isLoading = false;
         });
-      }
-    } catch (e) {
-      if (mounted) {
-        if (_allBookings.isEmpty) {
-          setState(() {
-            _error = extractErrorMessage(e);
-            _isLoading = false;
-          });
-        } else {
-          setState(() => _isLoading = false);
-          AppSnackbar.error('Could not refresh bookings');
-        }
+      } else {
+        setState(() => _isLoading = false);
+        AppSnackbar.error('Could not refresh bookings');
       }
     }
   }
 
   Future<void> _loadMoreBookings() async {
     if (_isLoadingMore || !_hasMore) return;
+
+    final reqId = _loadRequestId;
+    final requestedTab = _currentTab;
 
     setState(() {
       _isLoadingMore = true;
@@ -200,6 +217,7 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
     try {
       final token = _storage.getToken();
       if (token == null) {
+        if (!mounted) return;
         setState(() => _isLoadingMore = false);
         return;
       }
@@ -209,11 +227,14 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
       final response = await _repo.getBookingsPage(
         token,
         page: nextPage,
-        tab: _currentTab,
+        tab: requestedTab,
         search: searchText.isNotEmpty ? searchText : null,
         bookingType: _selectedBookingType,
         vehicleAvailability: _selectedVehicleAvailability,
       );
+
+      // Discard if user switched tabs or triggered a fresh load while paginating
+      if (reqId != _loadRequestId || !mounted) return;
 
       setState(() {
         _allBookings.addAll(response.bookings);
@@ -223,6 +244,7 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
         _isLoadingMore = false;
       });
     } catch (e) {
+      if (reqId != _loadRequestId || !mounted) return;
       setState(() {
         _isLoadingMore = false;
       });
@@ -230,23 +252,48 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
   }
 
   Future<void> _acceptBooking(Booking booking) async {
+    // Concurrency guard. Tapping Accept on a second booking while the
+    // first is still awaiting the API response was opening a second
+    // loader dialog over the first. `Get.back()` then closed the
+    // topmost one, leaving the other stuck on screen forever — what
+    // the user saw as an "infinite loader". One in-flight action at
+    // a time is the simplest fix.
+    if (_isProcessingBookingAction) return;
+    _isProcessingBookingAction = true;
+
     final token = _storage.getToken();
     if (token == null) {
+      _isProcessingBookingAction = false;
       AppSnackbar.error('Session expired. Please login again.');
       return;
     }
 
+    // Show loader as a regular Flutter dialog so we can pop it via
+    // its OWN `dialogContext` later — no risk of `Get.back()` closing
+    // the wrong route.
+    BuildContext? loaderContext;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        loaderContext = ctx;
+        return const Center(
+          child: CircularProgressIndicator(color: Color(0xFF0077C8)),
+        );
+      },
+    );
+
+    void closeLoader() {
+      if (loaderContext != null && Navigator.canPop(loaderContext!)) {
+        Navigator.of(loaderContext!).pop();
+        loaderContext = null;
+      }
+    }
+
     try {
-      // Show loading
-      Get.dialog(
-        const Center(
-            child: CircularProgressIndicator(color: Color(0xFF0077C8))),
-        barrierDismissible: false,
-      );
-
       await _repo.acceptBooking(token: token, bookingId: booking.bookingId);
-
-      Get.back(); // Close loading
+      if (!mounted) return;
+      closeLoader();
       AppSnackbar.success('Booking accepted successfully');
 
       // Switch to Current tab and refresh bookings
@@ -255,8 +302,11 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
       });
       _loadBookings();
     } catch (e) {
-      Get.back(); // Close loading
+      if (!mounted) return;
+      closeLoader();
       AppSnackbar.error(extractErrorMessage(e));
+    } finally {
+      _isProcessingBookingAction = false;
     }
   }
 
@@ -362,34 +412,55 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
   }
 
   Future<void> _rejectBooking(Booking booking, int reasonCode) async {
+    // Same concurrency guard + scoped-loader pattern as `_acceptBooking`.
+    // See that function for the rationale.
+    if (_isProcessingBookingAction) return;
+    _isProcessingBookingAction = true;
+
     final token = _storage.getToken();
     if (token == null) {
+      _isProcessingBookingAction = false;
       AppSnackbar.error('Session expired. Please login again.');
       return;
     }
 
-    try {
-      // Show loading
-      Get.dialog(
-        const Center(
-            child: CircularProgressIndicator(color: Color(0xFF0077C8))),
-        barrierDismissible: false,
-      );
+    BuildContext? loaderContext;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        loaderContext = ctx;
+        return const Center(
+          child: CircularProgressIndicator(color: Color(0xFF0077C8)),
+        );
+      },
+    );
 
+    void closeLoader() {
+      if (loaderContext != null && Navigator.canPop(loaderContext!)) {
+        Navigator.of(loaderContext!).pop();
+        loaderContext = null;
+      }
+    }
+
+    try {
       await _repo.rejectBooking(
         token: token,
         bookingId: booking.bookingId,
         reasonCode: reasonCode,
       );
-
-      Get.back(); // Close loading
+      if (!mounted) return;
+      closeLoader();
       AppSnackbar.success('Booking rejected successfully');
 
       // Refresh bookings
       _loadBookings();
     } catch (e) {
-      Get.back(); // Close loading
+      if (!mounted) return;
+      closeLoader();
       AppSnackbar.error(extractErrorMessage(e));
+    } finally {
+      _isProcessingBookingAction = false;
     }
   }
 
@@ -496,11 +567,7 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
             onTap: () {},
           ),
           SizedBox(width: width * 0.02),
-          _buildHeaderIcon(
-            size: width * 0.12,
-            assetPath: 'assets/icons/notification_icon.png',
-            onTap: () {},
-          ),
+          _buildNotificationIcon(width),
           SizedBox(width: width * 0.02),
           GestureDetector(
             onTap: () => Get.find<EmployeeNavController>().goToProfile(),
@@ -560,6 +627,66 @@ class _EmployeeDashboardState extends State<EmployeeDashboard> {
           width: size,
           height: size,
           fit: BoxFit.contain,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNotificationIcon(double width) {
+    final notifController = Get.find<EmployeeNotificationController>();
+    final size = width * 0.12;
+
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const EmployeeNotificationScreen(),
+          ),
+        );
+      },
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: Stack(
+          children: [
+            ClipOval(
+              child: Image.asset(
+                'assets/icons/notification_icon.png',
+                width: size,
+                height: size,
+                fit: BoxFit.contain,
+              ),
+            ),
+            Obx(() {
+              final count = notifController.unreadCount.value;
+              if (count == 0) return const SizedBox.shrink();
+              return Positioned(
+                right: 0,
+                top: 0,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: const BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                  ),
+                  constraints: const BoxConstraints(
+                    minWidth: 18,
+                    minHeight: 18,
+                  ),
+                  child: Text(
+                    count > 99 ? '99+' : '$count',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              );
+            }),
+          ],
         ),
       ),
     );
