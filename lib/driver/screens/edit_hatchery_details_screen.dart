@@ -386,20 +386,23 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      useSafeArea: true,
       builder: (BuildContext context) {
-        return Container(
-          height: height * 0.75,
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.only(
-              topLeft: Radius.circular(20),
-              topRight: Radius.circular(20),
+        return SafeArea(
+          top: false,
+          child: Container(
+            height: height * 0.75,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(20),
+                topRight: Radius.circular(20),
+              ),
             ),
-          ),
-          child: Column(
-            children: [
-              /// ================= Header =================
-              Container(
+            child: Column(
+              children: [
+                /// ================= Header =================
+                Container(
                 padding: EdgeInsets.all(width * 0.05),
                 decoration: BoxDecoration(
                   border: Border(
@@ -647,7 +650,8 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
               ),
             ],
           ),
-        );
+        ),
+      );
       },
     );
   }

@@ -19,6 +19,16 @@ class DriverInJourneyException implements Exception {
   String toString() => message;
 }
 
+/// Thrown when the backend rejects an employee login because the employee is
+/// already logged in on another device. The auth controller catches this and
+/// shows a blocking dialog instead of a generic error.
+class EmployeeAlreadyLoggedInException implements Exception {
+  final String message;
+  EmployeeAlreadyLoggedInException(this.message);
+  @override
+  String toString() => message;
+}
+
 class ApiClient {
   /// Extracts error message from Laravel API response
   /// Handles various error formats:
@@ -182,6 +192,15 @@ class ApiClient {
         throw DriverInJourneyException(
           data['message']?.toString() ??
               'You are currently in an active journey on another device.',
+        );
+      }
+
+      // Employee already logged in on another device → typed exception so
+      // the auth controller can show a blocking dialog instead of a snackbar.
+      if (data is Map && data['error_code'] == 'EMPLOYEE_ALREADY_LOGGED_IN') {
+        throw EmployeeAlreadyLoggedInException(
+          data['message']?.toString() ??
+              'You are already logged in on another device.',
         );
       }
       print('API CLIENT ERROR: $data');

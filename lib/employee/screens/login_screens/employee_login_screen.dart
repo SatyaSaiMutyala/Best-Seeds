@@ -1,6 +1,8 @@
 import 'package:bestseeds/driver/screens/login_screens/login_screen.dart';
 import 'package:bestseeds/employee/controllers/auth_controller.dart';
 import 'package:bestseeds/employee/screens/employee_main_nav_screen.dart';
+import 'package:bestseeds/screens/privacy_policy_screen.dart';
+import 'package:bestseeds/screens/terms_and_conditions_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
@@ -17,9 +19,9 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
   final idCtrl = TextEditingController();
   final passCtrl = TextEditingController();
 
-  // Track if form is valid (ID not empty and password min 6 chars)
   bool _isFormValid = false;
   bool _obscurePassword = true;
+  bool _isTermsAccepted = false;
 
   @override
   void initState() {
@@ -45,6 +47,7 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
       });
     }
   }
+
   @override
   Widget build(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
@@ -56,248 +59,287 @@ class _EmployeeLoginScreenState extends State<EmployeeLoginScreen> {
         width: width,
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: [
-              Color(0xFF0077C8),
-              Color(0xFF3FA9F5),
-            ],
+            colors: [Color(0xFF0077C8), Color(0xFF3FA9F5)],
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
           ),
         ),
         child: SafeArea(
-          child: CustomScrollView(
-            slivers: [
-              SliverFillRemaining(
-                hasScrollBody: false,
+          child: SingleChildScrollView(
+            reverse: true,
+            child: Column(
+            children: [
+              Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: width * 0.06,
+                  vertical: height * 0.02,
+                ),
                 child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: width * 0.06,
-                        vertical: height * 0.02,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment:
-                                MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                'Login as Employee',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: width * 0.055,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              GestureDetector(
-                                onTap: () => {
-                                  Navigator.pushReplacement(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (context) =>
-                                          DriverLoginScreen(),
-                                    ),
-                                  ),
-                                },
-                                child: Container(
-                                  padding: const EdgeInsets.all(6),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white24,
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(
-                                    Icons.more_horiz,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              )
-                            ],
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Login as Employee',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: width * 0.055,
+                            fontWeight: FontWeight.w600,
                           ),
-
-                          SizedBox(height: height * 0.07),
-
-                          Center(
-                            child: Text(
-                              'Secure Access for \n Bestseed Employees',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: width * 0.07,
-                                fontWeight: FontWeight.bold,
-                                height: 1.3,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    Flexible(
-                      child: Center(
-                        child: Image.asset(
-                          'assets/images/employee_login.png',
-                          width: width,
-                          fit: BoxFit.contain,
                         ),
-                      ),
-                    ),
-
-                    Container(
-                      width: double.infinity,
-                      padding: EdgeInsets.symmetric(
-                        horizontal: width * 0.06,
-                        vertical: height * 0.035,
-                      ),
-                      decoration: const BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.only(
-                          topLeft: Radius.circular(30),
-                          topRight: Radius.circular(30),
+                        GestureDetector(
+                          onTap: () => Navigator.pushReplacement(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => DriverLoginScreen(),
+                            ),
+                          ),
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: const BoxDecoration(
+                              color: Colors.white24,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.more_horiz,
+                              color: Colors.white,
+                            ),
+                          ),
                         ),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            'Log in with your Bestseed ID',
-                            style: TextStyle(
-                              fontSize: width * 0.045,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-
-                          SizedBox(height: height * 0.025),
-
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12),
-                            decoration: BoxDecoration(
-                              border:
-                                  Border.all(color: Colors.grey.shade300),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: idCtrl,
-                                    keyboardType: TextInputType.text,
-                                    decoration: const InputDecoration(
-                                      hintText: 'Enter Bestseed ID',
-                                      border: InputBorder.none,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          SizedBox(height: height * 0.03),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12),
-                            decoration: BoxDecoration(
-                              border:
-                                  Border.all(color: Colors.grey.shade300),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: passCtrl,
-                                    keyboardType: TextInputType.text,
-                                    obscureText: _obscurePassword,
-                                    decoration: InputDecoration(
-                                      hintText: 'Enter Password',
-                                      border: InputBorder.none,
-                                      suffixIcon: IconButton(
-                                        icon: Icon(
-                                          _obscurePassword
-                                              ? Icons.visibility_off
-                                              : Icons.visibility,
-                                          color: Colors.grey,
-                                        ),
-                                        onPressed: () {
-                                          setState(() {
-                                            _obscurePassword = !_obscurePassword;
-                                          });
-                                        },
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-
-                          SizedBox(height: height * 0.03),
-
-                          Obx(() => SizedBox(
-                                width: double.infinity,
-                                height: height * 0.06,
-                                child: ElevatedButton(
-                                  onPressed:
-                                      controller.isLoading.value ||
-                                              !_isFormValid
-                                          ? null
-                                          : () {
-                                              controller.employeeLogin(
-                                                idCtrl.text.trim(),
-                                                passCtrl.text.trim(),
-                                              );
-                                            },
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: _isFormValid
-                                        ? const Color(0xFF0077C8)
-                                        : const Color(0xFF0077C8)
-                                            .withValues(alpha: 0.4),
-                                    disabledBackgroundColor:
-                                        const Color(0xFF0077C8)
-                                            .withValues(alpha: 0.4),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius:
-                                          BorderRadius.circular(14),
-                                    ),
-                                  ),
-                                  child: controller.isLoading.value
-                                      ? const CircularProgressIndicator(
-                                          color: Colors.white)
-                                      : Text(
-                                          'Continue',
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.bold,
-                                            color: _isFormValid
-                                                ? Colors.white
-                                                : Colors.white.withValues(
-                                                    alpha: 0.7),
-                                          ),
-                                        ),
-                                ),
-                              )),
-
-                          SizedBox(height: height * 0.02),
-
-                          Center(
-                            child: Text(
-                              'By sign-in, I agree to the Terms & Conditions\nand Privacy Policy of BestSeed.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: width * 0.032,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          ),
-                        ],
+                      ],
+                    ),
+                    SizedBox(height: height * 0.04),
+                    Center(
+                      child: Text(
+                        'Secure Access for\nBestseed Employees',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: width * 0.07,
+                          fontWeight: FontWeight.bold,
+                          height: 1.3,
+                        ),
+                        textAlign: TextAlign.center,
                       ),
                     ),
                   ],
                 ),
               ),
+              SizedBox(
+                height: height * 0.28,
+                child: Image.asset(
+                  'assets/images/employee_login.png',
+                  width: width,
+                  fit: BoxFit.contain,
+                ),
+              ),
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.only(
+                  left: width * 0.06,
+                  right: width * 0.06,
+                  top: height * 0.03,
+                  bottom: height * 0.04,
+                ),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(30),
+                    topRight: Radius.circular(30),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Log in with your Bestseed ID',
+                      style: TextStyle(
+                        fontSize: width * 0.045,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: height * 0.025),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: idCtrl,
+                              keyboardType: TextInputType.text,
+                              decoration: const InputDecoration(
+                                hintText: 'Enter Bestseed ID',
+                                border: InputBorder.none,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(height: height * 0.02),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade300),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: passCtrl,
+                              keyboardType: TextInputType.text,
+                              obscureText: _obscurePassword,
+                              decoration: InputDecoration(
+                                hintText: 'Enter Password',
+                                border: InputBorder.none,
+                                suffixIcon: IconButton(
+                                  icon: Icon(
+                                    _obscurePassword
+                                        ? Icons.visibility_off
+                                        : Icons.visibility,
+                                    color: Colors.grey,
+                                  ),
+                                  onPressed: () {
+                                    setState(() {
+                                      _obscurePassword = !_obscurePassword;
+                                    });
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(height: height * 0.02),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Checkbox(
+                          value: _isTermsAccepted,
+                          activeColor: const Color(0xFF0077C8),
+                          onChanged: (val) {
+                            setState(() {
+                              _isTermsAccepted = val ?? false;
+                            });
+                          },
+                        ),
+                        Expanded(
+                          child: Wrap(
+                            children: [
+                              Text(
+                                'I agree to the ',
+                                style: TextStyle(
+                                  fontSize: width * 0.032,
+                                  color: Colors.grey.shade700,
+                                ),
+                              ),
+                              GestureDetector(
+                                onTap: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const TermsAndConditionsScreen(),
+                                  ),
+                                ),
+                                child: Text(
+                                  'Terms & Conditions',
+                                  style: TextStyle(
+                                    fontSize: width * 0.032,
+                                    color: const Color(0xFF0077C8),
+                                    fontWeight: FontWeight.w600,
+                                    decoration: TextDecoration.underline,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                ' and ',
+                                style: TextStyle(
+                                  fontSize: width * 0.032,
+                                  color: Colors.grey.shade700,
+                                ),
+                              ),
+                              GestureDetector(
+                                onTap: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => const PrivacyPolicyScreen(),
+                                  ),
+                                ),
+                                child: Text(
+                                  'Privacy Policy',
+                                  style: TextStyle(
+                                    fontSize: width * 0.032,
+                                    color: const Color(0xFF0077C8),
+                                    fontWeight: FontWeight.w600,
+                                    decoration: TextDecoration.underline,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                ' of BestSeed.',
+                                style: TextStyle(
+                                  fontSize: width * 0.032,
+                                  color: Colors.grey.shade700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: height * 0.02),
+                    Obx(() => SizedBox(
+                          width: double.infinity,
+                          height: height * 0.06,
+                          child: ElevatedButton(
+                            onPressed: controller.isLoading.value ||
+                                    !_isFormValid ||
+                                    !_isTermsAccepted
+                                ? null
+                                : () {
+                                    controller.employeeLogin(
+                                      idCtrl.text.trim(),
+                                      passCtrl.text.trim(),
+                                    );
+                                  },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor:
+                                  (_isFormValid && _isTermsAccepted)
+                                      ? const Color(0xFF0077C8)
+                                      : const Color(0xFF0077C8)
+                                          .withValues(alpha: 0.4),
+                              disabledBackgroundColor:
+                                  const Color(0xFF0077C8).withValues(alpha: 0.4),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                            child: controller.isLoading.value
+                                ? const CircularProgressIndicator(
+                                    color: Colors.white)
+                                : Text(
+                                    'Continue',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: (_isFormValid && _isTermsAccepted)
+                                          ? Colors.white
+                                          : Colors.white.withValues(alpha: 0.7),
+                                    ),
+                                  ),
+                          ),
+                        )),
+                  ],
+                ),
+              ),
             ],
+          ),
           ),
         ),
       ),

@@ -1109,31 +1109,34 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      useSafeArea: true,
       builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            // Fetch drivers on first build
-            if (isLoadingDrivers && drivers.isEmpty) {
-              fetchDrivers(setModalState);
-            }
+        return SafeArea(
+          top: false,
+          child: StatefulBuilder(
+            builder: (context, setModalState) {
+              // Fetch drivers on first build
+              if (isLoadingDrivers && drivers.isEmpty) {
+                fetchDrivers(setModalState);
+              }
 
-            return Container(
-              margin: const EdgeInsets.only(top: 16),
-              constraints: BoxConstraints(
-                maxHeight: height * 0.85,
-              ),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(20),
-                  topRight: Radius.circular(20),
+              return Container(
+                margin: const EdgeInsets.only(top: 16),
+                constraints: BoxConstraints(
+                  maxHeight: height * 0.85,
                 ),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  /// ================= Header =================
-                  Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(20),
+                    topRight: Radius.circular(20),
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    /// ================= Header =================
+                    Container(
                     padding: EdgeInsets.all(width * 0.05),
                     decoration: BoxDecoration(
                       border: Border(
@@ -1827,10 +1830,11 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                       ),
                     ),
                   ),
-                ],
-              ),
-            );
-          },
+                  ],
+                ),
+              );
+            },
+          ),
         );
       },
     );
@@ -1871,6 +1875,8 @@ class _EditHatcheryDetailsScreenState extends State<EditHatcheryDetailsScreen> {
                 driver.vehicleStartAddress!.isNotEmpty)
               _buildDriverRow(
                   'Start Location', driver.vehicleStartAddress!, width),
+            if (driver.priority != null)
+              _buildDriverRow('Priority', driver.priority.toString(), width),
           ],
         ),
       ),

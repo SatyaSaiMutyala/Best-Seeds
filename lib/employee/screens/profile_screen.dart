@@ -3,6 +3,8 @@ import 'package:bestseeds/employee/screens/employee_main_nav_screen.dart';
 import 'package:bestseeds/employee/screens/help_screen.dart';
 import 'package:bestseeds/employee/screens/notification_screen.dart';
 import 'package:bestseeds/routes/app_routes.dart';
+import 'package:bestseeds/screens/privacy_policy_screen.dart';
+import 'package:bestseeds/screens/terms_and_conditions_screen.dart';
 import 'package:bestseeds/widgets/profile_menu_item.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -82,12 +84,22 @@ class EmployeeProfileScreen extends StatelessWidget {
                     ProfileMenuItem(
                       icon: Icons.description_outlined,
                       title: 'Terms & conditions',
-                      onTap: () {},
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const TermsAndConditionsScreen(),
+                        ),
+                      ),
                     ),
                     ProfileMenuItem(
                       icon: Icons.privacy_tip_outlined,
                       title: 'Privacy Policy',
-                      onTap: () {},
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const PrivacyPolicyScreen(),
+                        ),
+                      ),
                     ),
                     SizedBox(height: height * 0.02),
                     ProfileMenuItem(

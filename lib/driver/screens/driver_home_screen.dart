@@ -30,11 +30,19 @@ class DriverDashboard extends StatefulWidget {
 
 class _DriverDashboardState extends State<DriverDashboard>
     with WidgetsBindingObserver {
+  static const MethodChannel _deviceInfoChannel =
+      MethodChannel('bestseeds/device_info');
+
   int selectedTabIndex = 2;
   final DriverStorageService _storage = DriverStorageService();
   final DriverAuthRepository _repo = DriverAuthRepository();
   Driver? _driver;
   String? _locationAddress;
+
+  // Prevents concurrent battery-optimization dialogs (initState + startJourney
+  // both call _ensureBatteryOptimizationExemption; without this flag they race
+  // and show two dialogs simultaneously).
+  bool _batteryExemptionInProgress = false;
 
   List<DriverRoute> _allRoutes = [];
   List<DriverRoute> _filteredRoutes = [];
@@ -74,7 +82,6 @@ class _DriverDashboardState extends State<DriverDashboard>
     _fetchBookings();
     _checkActiveJourney();
     _requestNotificationPermission();
-    _requestBatteryExemptionEarly();
     TrackingAlertService.start();
   }
 
@@ -93,28 +100,72 @@ class _DriverDashboardState extends State<DriverDashboard>
     }
   }
 
-  /// Request battery optimization exemption the first time the driver
-  /// opens the app, BEFORE they start a journey.
-  ///
-  /// Previously this was only requested inside _ensureLocationPermissions,
-  /// which only runs when the driver taps "Start Journey". That meant a
-  /// driver could hit "resume journey" after app kill (via
-  /// _checkActiveJourney -> restartIfNeeded) and never be prompted at
-  /// all — the background service would run without the exemption and
-  /// the OEM would kill it again. Moving the prompt to initState
-  /// guarantees it's asked on first launch, not just on first journey.
-  ///
-  /// No-op if already granted. If denied, the journey-start flow will
-  /// request it again and the app still functions (just with reduced
-  /// background reliability on aggressive OEM ROMs).
-  Future<void> _requestBatteryExemptionEarly() async {
+  Future<bool> _ensureBatteryOptimizationExemption() async {
+    if (!Platform.isAndroid) return true;
+
+    // Guard against concurrent calls (e.g. initState + startJourney).
+    if (_batteryExemptionInProgress) return false;
+    _batteryExemptionInProgress = true;
+
     try {
-      final status = await Permission.ignoreBatteryOptimizations.status;
-      if (!status.isGranted) {
+      // Standard Android check via permission_handler.
+      final permStatus = await Permission.ignoreBatteryOptimizations.status;
+      if (permStatus.isGranted) return true;
+
+      // Native channel double-check.
+      try {
+        final isIgnoring = await _deviceInfoChannel.invokeMethod<bool>(
+              'isIgnoringBatteryOptimizations',
+            ) ??
+            false;
+        if (isIgnoring) return true;
+      } catch (_) {}
+
+      // On many OEM phones (iQOO/Vivo, OnePlus, Samsung, etc.) the standard
+      // Android API always reports "not granted" even after the user enables the
+      // OEM's own background-running permission. Asking every app open would show
+      // the dialog forever. We show it only ONCE per install using a prefs flag.
+      final prefs = await SharedPreferences.getInstance();
+      final alreadyPrompted = prefs.getBool('battery_opt_prompted') ?? false;
+      if (alreadyPrompted) return false;
+
+      if (!mounted) return false;
+
+      final shouldOpen = await _showPermissionDialog(
+        title: 'Disable Battery Optimization',
+        message:
+            'To keep live truck tracking running while the phone is locked for long journeys, please allow "Drive Bestseed" to ignore battery optimization.\n\n'
+            'Otherwise some Android phones stop GPS updates after 30-40 minutes and the customer marker gets stuck.',
+        icon: Icons.battery_saver_rounded,
+        iconColor: const Color(0xFF0077C8),
+      );
+
+      // Mark prompted regardless of choice — OEM APIs may never report
+      // "granted" even after the user enables it, so we must not re-ask.
+      await prefs.setBool('battery_opt_prompted', true);
+
+      if (!shouldOpen) return false;
+
+      try {
+        await _deviceInfoChannel.invokeMethod(
+          'requestIgnoreBatteryOptimizations',
+        );
+      } catch (_) {
         await Permission.ignoreBatteryOptimizations.request();
       }
-    } catch (_) {
-      // Non-fatal — the journey-start flow still re-requests this.
+
+      await Future.delayed(const Duration(milliseconds: 800));
+
+      try {
+        return await _deviceInfoChannel.invokeMethod<bool>(
+              'isIgnoringBatteryOptimizations',
+            ) ??
+            false;
+      } catch (_) {
+        return (await Permission.ignoreBatteryOptimizations.status).isGranted;
+      }
+    } finally {
+      _batteryExemptionInProgress = false;
     }
   }
 
@@ -211,35 +262,6 @@ class _DriverDashboardState extends State<DriverDashboard>
           _isLoading = false;
         });
 
-        // Auto-start location service if any route has status 4 (in-progress)
-        // Handles: new phone login, app reinstall, service killed by OS
-        final hasLiveRoute = response.routes.any(
-          (r) => r.bookings.any((b) => b.status == 4),
-        );
-        if (hasLiveRoute) {
-          final running = await BackgroundLocationService.isRunning();
-          if (!running) {
-            // Check if we have background location permission before starting
-            final locAlways = await Permission.locationAlways.status;
-            if (locAlways.isGranted) {
-              debugPrint(
-                  '_fetchBookings: Found live route but service not running, starting...');
-              await DriverLocationService.start(token);
-            } else {
-              debugPrint(
-                  '_fetchBookings: Live route found but no background location permission');
-              final shouldOpen = await _showPermissionDialog(
-                title: 'Background Location Needed',
-                message:
-                    'You have an active delivery but background location is not enabled.\n\n'
-                    'Please tap "Open Settings" and select "Allow all the time" for Location to resume tracking.',
-                icon: Icons.my_location_rounded,
-                iconColor: const Color(0xFF0077C8),
-              );
-              if (shouldOpen) await openAppSettings();
-            }
-          }
-        }
       }
     } catch (e) {
       if (mounted) {
@@ -611,52 +633,54 @@ class _DriverDashboardState extends State<DriverDashboard>
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return Container(
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(20),
-                  topRight: Radius.circular(20),
+        return SafeArea(
+          top: false,
+          child: StatefulBuilder(
+            builder: (context, setModalState) {
+              return Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(20),
+                    topRight: Radius.circular(20),
+                  ),
                 ),
-              ),
-              padding: EdgeInsets.all(width * 0.05),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Filters',
-                        style: TextStyle(
-                          fontSize: width * 0.05,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          setModalState(() {
-                            _selectedBookingType = null;
-                          });
-                        },
-                        child: Text(
-                          'Clear All',
+                padding: EdgeInsets.all(width * 0.05),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Filters',
                           style: TextStyle(
-                            color: const Color(0xFF0077C8),
-                            fontSize: width * 0.04,
+                            fontSize: width * 0.05,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: width * 0.04),
+                        TextButton(
+                          onPressed: () {
+                            setModalState(() {
+                              _selectedBookingType = null;
+                            });
+                          },
+                          child: Text(
+                            'Clear All',
+                            style: TextStyle(
+                              color: const Color(0xFF0077C8),
+                              fontSize: width * 0.04,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: width * 0.04),
 
-                  // Booking Type Filter
-                  Text(
-                    'Booking Type',
+                    // Booking Type Filter
+                    Text(
+                      'Booking Type',
                     style: TextStyle(
                       fontSize: width * 0.042,
                       fontWeight: FontWeight.w600,
@@ -716,11 +740,12 @@ class _DriverDashboardState extends State<DriverDashboard>
                       ),
                     ),
                   ),
-                  SizedBox(height: width * 0.02),
-                ],
-              ),
-            );
-          },
+                    SizedBox(height: width * 0.02),
+                  ],
+                ),
+              );
+            },
+          ),
         );
       },
     );
@@ -1279,21 +1304,19 @@ class _DriverDashboardState extends State<DriverDashboard>
     }
 
     // Step 2: Background location ("Allow all the time")
+    // On Android 10+, locationAlways.request() shows a system dialog (or opens
+    // the app's location settings page). We must NOT show our own dialog after
+    // request() returns — the user already saw the system UI, and showing
+    // another dialog on top causes the double-dialog issue on all Android devices.
+    // If the user didn't grant it, show a snackbar and let them retry.
     var locAlways = await Permission.locationAlways.status;
     if (!locAlways.isGranted) {
-      locAlways = await Permission.locationAlways.request();
+      await Permission.locationAlways.request();
+      locAlways = await Permission.locationAlways.status;
       if (!locAlways.isGranted) {
-        // On Android 11+, locationAlways.request() may not show a dialog
-        // and returns denied — user must go to settings manually
-        final shouldOpen = await _showPermissionDialog(
-          title: 'Background Location Needed',
-          message:
-              'For continuous delivery tracking, we need location access even when the app is in the background.\n\n'
-              'Please tap "Open Settings" and select "Allow all the time" for Location.',
-          icon: Icons.my_location_rounded,
-          iconColor: const Color(0xFF0077C8),
+        AppSnackbar.error(
+          'Background location required. Please allow "All the time" in location settings, then tap Start Journey again.',
         );
-        if (shouldOpen) await openAppSettings();
         return false;
       }
     }
@@ -1308,10 +1331,7 @@ class _DriverDashboardState extends State<DriverDashboard>
     // (OnePlus, Realme, Oppo, Xiaomi, Vivo, Huawei) that aggressively kill
     // background services. Without this, the location service dies after
     // 10-40 minutes.
-    final batteryStatus = await Permission.ignoreBatteryOptimizations.status;
-    if (!batteryStatus.isGranted) {
-      await Permission.ignoreBatteryOptimizations.request();
-    }
+    await _ensureBatteryOptimizationExemption();
 
     // Step 5: Show OEM-specific autostart guidance on first journey start.
     // OnePlus, Realme, Oppo, Xiaomi have a proprietary "autostart" permission
@@ -1345,7 +1365,7 @@ class _DriverDashboardState extends State<DriverDashboard>
               width: 64,
               height: 64,
               decoration: BoxDecoration(
-                color: iconColor.withOpacity(0.1),
+                color: iconColor.withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
               child: Icon(icon, color: iconColor, size: 32),
@@ -1510,8 +1530,8 @@ class _DriverDashboardState extends State<DriverDashboard>
     try {
       // Use ProcessResult to get the manufacturer from Android build info.
       // This works because we already have the android.os.Build class available.
-      final result = await const MethodChannel('bestseeds/device_info')
-          .invokeMethod<String>('getManufacturer');
+      final result =
+          await _deviceInfoChannel.invokeMethod<String>('getManufacturer');
       return result ?? 'unknown';
     } catch (_) {
       return 'unknown';
@@ -1539,8 +1559,10 @@ class _DriverDashboardState extends State<DriverDashboard>
       if (!permissionGranted) return;
     }
 
+    bool loadingDialogShown = false;
     try {
       // Show loading indicator
+      if (!mounted) return;
       showDialog(
         context: context,
         barrierDismissible: false,
@@ -1548,6 +1570,7 @@ class _DriverDashboardState extends State<DriverDashboard>
           child: CircularProgressIndicator(color: Color(0xFF0077C8)),
         ),
       );
+      loadingDialogShown = true;
 
       // Get driver's current location to save as start location
       double? startLat;
@@ -1584,8 +1607,13 @@ class _DriverDashboardState extends State<DriverDashboard>
         startAddress: startAddress,
       );
 
-      // Close loading dialog
-      if (mounted) Navigator.pop(context);
+      // Dismiss loading BEFORE starting the service so that any system dialog
+      // triggered by the service (e.g. Xiaomi battery opt prompt) appears on a
+      // clean stack, not stacked on top of the loading spinner.
+      if (mounted && loadingDialogShown) {
+        Navigator.pop(context);
+        loadingDialogShown = false;
+      }
 
       AppSnackbar.success('Journey started successfully');
       debugPrint('START JOURNEY: Starting DriverLocationService');
@@ -1596,11 +1624,13 @@ class _DriverDashboardState extends State<DriverDashboard>
       });
       _fetchBookings();
     } catch (e) {
-      // Close loading dialog
-      if (mounted) Navigator.pop(context);
-
       AppSnackbar.error('Failed to start journey. Please try again.');
       debugPrint('Error starting journey: $e');
+    } finally {
+      // Safety net: dismiss loading dialog if an unexpected path left it open.
+      if (mounted && loadingDialogShown) {
+        Navigator.pop(context);
+      }
     }
   }
 
@@ -1613,13 +1643,16 @@ class _DriverDashboardState extends State<DriverDashboard>
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
-        return DropLocationsBottomSheet(
-          route: route,
-          width: width,
-          height: height,
-          onUpdate: () {
-            _fetchBookings();
-          },
+        return SafeArea(
+          top: false,
+          child: DropLocationsBottomSheet(
+            route: route,
+            width: width,
+            height: height,
+            onUpdate: () {
+              _fetchBookings();
+            },
+          ),
         );
       },
     );

@@ -37,6 +37,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   static const LatLng _defaultLocation = LatLng(17.3850, 78.4867);
   static const Duration _liveTrackingPollInterval = Duration(seconds: 7);
   static const Duration _routeRefreshInterval = Duration(minutes: 2);
+
+  // Route polyline cache keys — keeps green line consistent across screen reopens.
   // Minimum gap between two reroute API calls. 15 seconds is the
   // responsive-but-safe lower bound: prevents a flickering GPS from
   // firing back-to-back reroutes while still letting a real deviation
@@ -122,8 +124,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   List<LatLng> _fullPolyline = [];
   List<double> _cumulativeDistances = [];
 
-  // Actual GPS breadcrumbs — the real path the driver took.
-  // Used for the green completed polyline instead of Directions API route.
+  // GPS breadcrumbs — filtered/snapped actual path. Used for pipeline
+  // state tracking (breadcrumb seeding, downsample). Green line uses
+  // _fullPolyline segment slice, not raw breadcrumbs.
   List<LatLng> _driverBreadcrumbs = [];
   DateTime? _lastBreadcrumbTime;
 
@@ -139,6 +142,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   bool _fixedStopsGenerated = false;
   int _currentStopIndex = -1; // -1 = not started, 0 = at/past first stop, etc.
   Map<int, String> _passedStopTimes = {}; // Locked times for passed stops
+  Map<int, String> _passedStopModes = {}; // near | bypass
 
   // Full pickup→destination polyline (for fixed stop generation)
   List<LatLng> _fullRoutePolyline = [];
@@ -152,13 +156,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   int _remainingDurationSeconds = 0;
 
   // Locally-computed driver speed (exponentially smoothed). Computed
-  // from successive poll positions, NOT trusted from the backend's
-  // pre-baked `speed_kmh` field — the backend value can be stale or
-  // miscomputed. We measure the actual distance traveled between polls
-  // and divide by elapsed seconds, then smooth to prevent a single GPS
-  // spike from flipping the value.
-  // Used by `_adaptiveRemainingSeconds()` to scale Google's static
-  // total-route duration into a real-time ETA.
+  // from successive poll positions. Used for reroute gating (skip reroute
+  // when speed < 5 km/h — driver is parked or crawling).
   double _estimatedSpeedKmh = 0;
   LatLng? _lastSpeedCalcPos;
   DateTime? _lastSpeedCalcTime;
@@ -200,6 +199,11 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
   // Multi-drop active-drop gating (always true for employee — employee sees all drops)
   bool _isActiveDrop = true;
+
+  // Priority of this booking's drop within the shared vehicle trip.
+  // Only waypoints with lower priority (earlier stops) should appear
+  // on this booking's blue polyline.
+  int _currentBookingWaypointPriority = 999999;
 
   // Refresh state
   DateTime _lastRefreshedAt = DateTime.now();
@@ -524,10 +528,12 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           _fixedStopsGenerated = false;
           _fixedStops = [];
           _currentStopIndex = -1;
+          _currentBookingWaypointPriority = 999999;
           _fullRoutePolyline = [];
           _fullRouteCumulativeDistances = [];
           _fullRouteDurationSeconds = 0;
           _passedStopTimes = {};
+          _passedStopModes = {};
           _approachPolyline = [];
           _lastAcceptedSnap = null;
           _lastAcceptedRaw = null;
@@ -536,7 +542,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           _snapCacheOutput = null;
           _consecutiveDeviations = 0;
           _homeMarkerLatLng = null;
-          // Clear cached stops so they regenerate
+          // Clear cached stops and route polyline so they regenerate
           SharedPreferences.getInstance().then((prefs) {
             prefs.remove('fixed_stops_${widget.booking.bookingId}');
             prefs.remove('stop_index_${widget.booking.bookingId}');
@@ -550,7 +556,14 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           // position (may be mid-animation, not the previous poll target).
           final animateFrom = _lastVehicleMarkerLatLng ?? previousVehiclePosition;
           if (animateFrom != null && _currentLatLng != null) {
-            _animateVehicleMarker(animateFrom, _currentLatLng!);
+            final moveDist = _haversineMeters(animateFrom, _currentLatLng!);
+            if (moveDist >= _breadcrumbMinDistance) {
+              _animateVehicleMarker(animateFrom, _currentLatLng!);
+            } else {
+              // Below noise floor — hold previous position to prevent jitter
+              _currentLatLng = animateFrom;
+              _refreshCompletedPolylineFromTimeline();
+            }
           } else {
             _buildMarkers();
             _refreshCompletedPolylineFromTimeline();
@@ -563,10 +576,10 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             } catch (_) {}
           }
 
-          // ── REROUTE DETECTION ──
+          // ── REROUTE DETECTION (consecutive deviation) ──
           if (_currentLatLng != null) {
             final polylinePoints = _polylines
-                .where((p) => p.polylineId.value != 'completed' && p.polylineId.value != 'approach')
+                .where((p) => p.polylineId.value != 'completed')
                 .expand((p) => p.points)
                 .toList();
             if (polylinePoints.isNotEmpty) {
@@ -659,6 +672,21 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       );
     }
 
+    // ── Resolve this booking's priority within the shared vehicle trip ──
+    // Match routeWaypoints entry closest to _destinationLatLng (≤ 300 m).
+    // Used to select only earlier-priority stops as blue-polyline waypoints,
+    // so booking N's route shows driver → p1 → p2 → … → pN correctly.
+    if (_destinationLatLng != null) {
+      for (final wp in (_trackingData?.routeWaypoints ?? [])) {
+        if (wp.lat == 0 && wp.lng == 0) continue;
+        if (_haversineMeters(LatLng(wp.lat, wp.lng), _destinationLatLng!) < 300) {
+          _currentBookingWaypointPriority = wp.priority;
+          debugPrint('📍 Booking priority resolved: ${wp.priority} (${wp.name})');
+          break;
+        }
+      }
+    }
+
     // APPROACH POLYLINE: admin pickup → driver start
     if (adminPickup != null && _currentLatLng != null && _approachPolyline.isEmpty) {
       LatLng? adminLatLng;
@@ -700,7 +728,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           .toList()
         ..sort((a, b) => a.priority.compareTo(b.priority));
       final remainingWaypoints = allWaypoints
-          .where((wp) => !wp.isCompleted)
+          .where((wp) => !wp.isCompleted && wp.priority < _currentBookingWaypointPriority)
           .map((wp) => LatLng(wp.lat, wp.lng))
           .toList();
 
@@ -733,13 +761,25 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
         final remainingSeconds =
             routeData['remaining_duration_seconds'] as int? ?? 0;
-        _remainingDurationSeconds = remainingSeconds; // actual time left from driver's current position, not total trip duration
+        _remainingDurationSeconds = remainingSeconds;
 
         // Route start time = driver's last update
         if (driverLoc.updatedAt != null && driverLoc.updatedAt!.isNotEmpty) {
           try {
             _routeStartTime = DateTime.parse(driverLoc.updatedAt!);
           } catch (_) {}
+        }
+
+        // ── WARM UP PIPELINE STATE ──
+        // Seed _currentSegmentIndex and snap state BEFORE the arrived check.
+        // This matches the user app's ordering: pipeline is always warmed so
+        // the first live poll has a correct anchor even if the driver just arrived.
+        if (_fullPolyline.length >= 2) {
+          if (_trackingData?.timeline.isNotEmpty ?? false) {
+            _replayTimelineThroughPipeline();
+          } else if (_currentLatLng != null) {
+            _initializeSegmentIndex(_currentLatLng!);
+          }
         }
 
         // ── IN TRANSIT or ARRIVED ──
@@ -751,73 +791,69 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           polylines.add(Polyline(
             polylineId: const PolylineId('completed'),
             points: List<LatLng>.from(_fullPolyline),
-            color: const Color(0xFF34A853),
+            color: const Color(0xFF66BB6A),
             width: 5,
           ));
           _estimatedDuration = '';
-        } else if (_currentLatLng != null && _fullPolyline.length >= 2) {
-          // Warm up segment index on first load
-          if (_trackingData?.timeline.isNotEmpty ?? false) {
-            _replayTimelineThroughPipeline();
-          } else if (_currentLatLng != null) {
-            _initializeSegmentIndex(_currentLatLng!);
-          }
-
-          // Seed breadcrumbs
+        } else if (_currentLatLng != null) {
+          // Seed breadcrumbs (snapped on seed — prevents initial line through buildings)
           if (_driverBreadcrumbs.isEmpty) {
             if (_pickupLatLng != null) _driverBreadcrumbs.add(_pickupLatLng!);
             _driverBreadcrumbs.add(_snapToRoute(_currentLatLng!));
             _lastBreadcrumbTime = DateTime.now();
           }
 
-          final snappedDriver = _snapToRoute(_currentLatLng!);
-          final double gapMax = _currentMode == 0 ? 130 : (_currentMode == 1 ? 350 : 700);
-          final bool gapViolation = _lastRenderedSnap != null &&
-              _haversineMeters(_lastRenderedSnap!, snappedDriver) > gapMax;
+          if (_fullPolyline.length >= 2) {
+            final snappedDriver = _snapToRoute(_currentLatLng!);
+            final double gapMax = _currentMode == 0 ? 130 : (_currentMode == 1 ? 350 : 700);
+            final bool gapViolation = _lastRenderedSnap != null &&
+                _haversineMeters(_lastRenderedSnap!, snappedDriver) > gapMax;
 
-          if (gapViolation) {
-            polylines = Set<Polyline>.from(_polylines);
-          } else {
-            _lastRenderedSnap = snappedDriver;
+            if (gapViolation) {
+              debugPrint('🚫 Gap protection: snap jumped >${gapMax.toStringAsFixed(0)}m, holding frame');
+              polylines = Set<Polyline>.from(_polylines);
+            } else {
+              _lastRenderedSnap = snappedDriver;
 
-            // ── APPROACH (green) — admin pickup → driver start ──
-            // Road-following line fetched via Directions API (same as blue line).
-            if (_approachPolyline.length >= 2) {
-              polylines.add(Polyline(
-                polylineId: const PolylineId('approach'),
-                points: List<LatLng>.from(_approachPolyline),
-                color: const Color(0xFF34A853),
-                width: 5,
-              ));
-            }
+              // ── APPROACH (green) — admin pickup → driver start ──
+              if (_approachPolyline.length >= 2) {
+                polylines.add(Polyline(
+                  polylineId: const PolylineId('approach'),
+                  points: List<LatLng>.from(_approachPolyline),
+                  color: const Color(0xFF66BB6A),
+                  width: 5,
+                ));
+              }
 
-            final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
-            final greenPoints = <LatLng>[
-              ..._preservedGreenPath,
-              ..._fullPolyline.sublist(0, splitAt + 1),
-              snappedDriver,
-            ];
-            if (greenPoints.length >= 2) {
-              polylines.add(Polyline(
-                polylineId: const PolylineId('completed'),
-                points: greenPoints,
-                color: const Color(0xFF34A853),
-                width: 5,
-              ));
-            }
+              final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
+              final greenPoints = <LatLng>[
+                ..._preservedGreenPath,
+                ..._fullPolyline.sublist(0, splitAt + 1),
+                snappedDriver,
+              ];
+              if (greenPoints.length >= 2) {
+                polylines.add(Polyline(
+                  polylineId: const PolylineId('completed'),
+                  points: greenPoints,
+                  color: const Color(0xFF66BB6A),
+                  width: 5,
+                ));
+              }
 
-            final bluePoints = <LatLng>[
-              snappedDriver,
-              if (splitAt + 1 < _fullPolyline.length)
-                ..._fullPolyline.sublist(splitAt + 1),
-            ];
-            if (bluePoints.length >= 2) {
-              polylines.add(Polyline(
-                polylineId: const PolylineId('remaining'),
-                points: bluePoints,
-                color: const Color(0xFF1A73E8),
-                width: 5,
-              ));
+              final bluePoints = <LatLng>[
+                snappedDriver,
+                if (splitAt + 1 < _fullPolyline.length)
+                  ..._fullPolyline.sublist(splitAt + 1),
+              ];
+              if (bluePoints.length >= 2) {
+                polylines.add(Polyline(
+                  polylineId: const PolylineId('remaining'),
+                  points: bluePoints,
+                  color: const Color(0xFF1A73E8),
+                  width: 5,
+                  patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+                ));
+              }
             }
           }
           _estimatedDuration = _formatDuration(remainingSeconds);
@@ -828,6 +864,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             points: _fullPolyline,
             color: const Color(0xFF1A73E8),
             width: 5,
+            patterns: [PatternItem.dash(20), PatternItem.gap(10)],
           ));
         }
       } else {
@@ -840,6 +877,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             points: [_currentLatLng!, _destinationLatLng!],
             color: const Color(0xFF1A73E8),
             width: 5,
+            patterns: [PatternItem.dash(20), PatternItem.gap(10)],
           ));
         }
       }
@@ -963,13 +1001,33 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   void _refreshCompletedPolylineFromTimeline() {
     if (_currentLatLng == null) return;
 
+    // Lock completed state when driver arrives at destination
+    if (_destinationLatLng != null &&
+        _haversineMeters(_currentLatLng!, _destinationLatLng!) < 30) {
+      if (_fullPolyline.length >= 2) {
+        final arrivedPolylines = _polylines
+            .where((p) =>
+                p.polylineId.value != 'completed' &&
+                p.polylineId.value != 'remaining')
+            .toSet();
+        arrivedPolylines.add(Polyline(
+          polylineId: const PolylineId('completed'),
+          points: List<LatLng>.from(_fullPolyline),
+          color: const Color(0xFF66BB6A),
+          width: 5,
+        ));
+        if (mounted) setState(() => _polylines = arrivedPolylines);
+      }
+      return;
+    }
+
     final updatedPolylines = _polylines
         .where((p) =>
             p.polylineId.value != 'completed' &&
             p.polylineId.value != 'remaining')
         .toSet();
 
-    if (_fullPolyline.length >= 5) {
+    if (_fullPolyline.length >= 2) {
       final snappedPos = _snapToRoute(_currentLatLng!);
 
       // ── GAP PROTECTION ──
@@ -991,20 +1049,14 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       if (gapHold) {
         debugPrint('🚫 Gap protection (live): snap jumped >${gapMax.toStringAsFixed(0)}m, '
             'holding frame — segment slice will resume next poll');
-        if (!mounted) return;
-        setState(() => _polylines = updatedPolylines);
         return;
       }
 
-      final splitIndex = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
+      final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
 
-      // Green: historical reroute snapshots + pickup → driver (on-road).
-      // See `_preservedGreenPath` doc for why we prepend the snapshot
-      // list — it keeps the pre-reroute travelled line visible after a
-      // route change instead of collapsing to a stub at the truck.
-      final greenPoints = [
+      final greenPoints = <LatLng>[
         ..._preservedGreenPath,
-        ..._fullPolyline.sublist(0, splitIndex + 1),
+        ..._fullPolyline.sublist(0, splitAt + 1),
         snappedPos,
       ];
       if (greenPoints.length >= 2) {
@@ -1012,19 +1064,18 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           Polyline(
             polylineId: const PolylineId('completed'),
             points: greenPoints,
-            color: const Color(0xFF34A853),
+            color: const Color(0xFF66BB6A),
             width: 5,
           ),
         );
       }
 
       // Blue: driver → destination (on-road)
-      final List<LatLng> bluePoints;
-      if (splitIndex >= _fullPolyline.length - 2) {
-        bluePoints = [snappedPos, _fullPolyline.last];
-      } else {
-        bluePoints = [snappedPos, ..._fullPolyline.sublist(splitIndex + 1)];
-      }
+      final bluePoints = <LatLng>[
+        snappedPos,
+        if (splitAt + 1 < _fullPolyline.length)
+          ..._fullPolyline.sublist(splitAt + 1),
+      ];
       if (bluePoints.length >= 2) {
         updatedPolylines.add(
           Polyline(
@@ -1032,18 +1083,10 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             points: bluePoints,
             color: const Color(0xFF1A73E8),
             width: 5,
+            patterns: [PatternItem.dash(20), PatternItem.gap(10)],
           ),
         );
       }
-    } else if (_driverBreadcrumbs.length >= 2) {
-      updatedPolylines.add(
-        Polyline(
-          polylineId: const PolylineId('completed'),
-          points: List<LatLng>.from(_driverBreadcrumbs),
-          color: const Color(0xFF34A853),
-          width: 5,
-        ),
-      );
     }
 
     if (!mounted) return;
@@ -1074,13 +1117,21 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         _isMapExpanded ? _expandedMapController : _smallMapController;
     if (controller == null) return;
 
+    // Dynamic zoom based on stable mode (not raw speed — avoids flickering)
+    final double zoom;
+    switch (_currentMode) {
+      case 2: zoom = 14.5; break;  // highway — wide view
+      case 1: zoom = 15.5; break;  // suburban
+      default: zoom = _followZoom;  // city — close
+    }
+
     try {
       _isProgrammaticCameraMove = true;
       controller.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: _currentLatLng!,
-            zoom: _followZoom,
+            zoom: zoom,
             bearing: _lastVehicleBearing,
             tilt: _followTilt,
           ),
@@ -1413,7 +1464,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   Future<void> _rerouteFromDriverPosition() async {
     if (_currentLatLng == null || _destinationLatLng == null) return;
     final remainingWaypoints = (_trackingData?.routeWaypoints ?? [])
-        .where((wp) => wp.lat != 0 && wp.lng != 0 && !wp.isCompleted)
+        .where((wp) => wp.lat != 0 && wp.lng != 0 && !wp.isCompleted &&
+               wp.priority < _currentBookingWaypointPriority)
         .toList()
       ..sort((a, b) => a.priority.compareTo(b.priority));
     final wpLatLngs = remainingWaypoints.map((wp) => LatLng(wp.lat, wp.lng)).toList();
@@ -1454,6 +1506,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         points: List<LatLng>.from(_fullPolyline),
         color: const Color(0xFF1A73E8),
         width: 5,
+        patterns: [PatternItem.dash(20), PatternItem.gap(10)],
       ));
     }
     if (mounted) setState(() { _polylines = updatedPolylines; _lastRouteRefreshAt = DateTime.now(); });
@@ -1728,20 +1781,29 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                       ),
                     ),
                     SizedBox(width: width * 0.02),
-                    Text(
-                      'Arriving in ',
-                      style: TextStyle(
-                        fontSize: width * 0.033,
-                        color: Colors.grey.shade700,
-                      ),
-                    ),
-                    Text(
-                      _estimatedDuration,
-                      style: TextStyle(
-                        fontSize: width * 0.038,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.black87,
-                      ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _remainingDurationSeconds > 0
+                              ? 'Arriving at ${_formatDateTimeObj(DateTime.now().add(Duration(seconds: _remainingDurationSeconds)))}'
+                              : (_estimatedDuration.isNotEmpty ? 'Arriving in $_estimatedDuration' : 'Calculating...'),
+                          style: TextStyle(
+                            fontSize: width * 0.038,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.black87,
+                          ),
+                        ),
+                        if (_estimatedDuration.isNotEmpty)
+                          Text(
+                            _estimatedDuration,
+                            style: TextStyle(
+                              fontSize: width * 0.030,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                      ],
                     ),
                   ],
                 ),
@@ -2778,12 +2840,19 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       driverAtFixedStop = dist < 10000; // within 10km = driver is at this stop
     }
 
-    // Vehicle widget — only show as separate item if NOT at a fixed stop and NOT near pickup
+    // Check if driver has reached the destination (within 300m).
+    // When true: only destination blinks — no truck widget or fixed stop blinks.
+    final bool driverReachedDestination = _currentLatLng != null &&
+        _destinationLatLng != null &&
+        _haversineMeters(_currentLatLng!, _destinationLatLng!) < 300;
+
+    // Vehicle widget — only show as separate item if NOT at a fixed stop, NOT near pickup,
+    // and NOT at destination (destination blinks itself when reached).
     final bool driverNearPickup = hasCurrentLocation &&
         _pickupLatLng != null &&
         _haversineDistance(_currentLatLng!, _pickupLatLng!) < 10000; // within 10km
     final bool willInsertVehicleWidget =
-        hasCurrentLocation && !driverAtFixedStop && !driverNearPickup;
+        hasCurrentLocation && !driverAtFixedStop && !driverNearPickup && !driverReachedDestination;
 
     /// -------- Pickup (always green, always first) --------
     // Use journey start time for pickup, not driver's current updatedAt
@@ -2822,7 +2891,9 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         driverLoc.name.isNotEmpty ? driverLoc.name : 'Current Location',
         _formatDate(driverLoc.updatedAt),
         _formatDateTime(driverLoc.updatedAt),
-        isPulsing: true,
+        // Only pulse when NOT at a fixed stop and NOT at destination —
+        // those locations pulse themselves.
+        isPulsing: !driverAtFixedStop && !driverReachedDestination,
         isPassed: true,
         isNextPassed: false,
       );
@@ -2867,14 +2938,18 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         final stop = _fixedStops[i];
         final name = stop['name'] as String? ?? 'Stop ${i + 1}';
         final isKeyStop = stop['is_key_stop'] == true;
-        final isDriverHere = driverAtFixedStop && i == _currentStopIndex;
+        // Driver is NOT "here" at a fixed stop when they've already reached the
+        // destination — destination takes full priority and blinks instead.
+        final isDriverHere = !driverReachedDestination && driverAtFixedStop && i == _currentStopIndex;
 
         final stopColor = isPassed ? Colors.green : Colors.black;
         String? subtitle;
         if (isDriverHere) {
           subtitle = _formatDate(driverLoc.updatedAt);
         } else if (isKeyStop) {
-          subtitle = isPassed ? 'Passed' : 'Key Stop';
+          subtitle = isPassed
+              ? (_passedStopModes[i] == 'bypass' ? 'Bypassed' : 'Passed')
+              : 'Key Stop';
         } else if (isPassed) {
           subtitle = 'Passed';
         }
@@ -2987,11 +3062,15 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         width,
         height,
         Icons.flag,
-        Colors.black,
+        driverReachedDestination ? Colors.green : Colors.black,
         'Destination',
-        destination.name.isNotEmpty ? destination.name : 'N/A',
+        driverReachedDestination
+            ? 'Reached'
+            : (destination.name.isNotEmpty ? destination.name : 'N/A'),
         destinationTime,
         isLast: true,
+        isPassed: driverReachedDestination,
+        isPulsing: driverReachedDestination,
       ),
     );
 
@@ -3099,26 +3178,10 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     _fullRouteCumulativeDistances = cumDist;
     _fullRouteDurationSeconds = totalDuration;
 
-    // Calculate stop count — extended for multi-day journeys (5–10 days).
-    // Short trips: 3–4 stops. Day trips: 1/hour up to 30. Multi-day: 1 per 8h up to 50.
-    final totalHours = totalDuration / 3600.0;
-    int stopCount;
-    if (totalHours <= 1) {
-      stopCount = 3;
-    } else if (totalHours <= 3) {
-      stopCount = 4;
-    } else if (totalHours <= 48) {
-      stopCount = totalHours.round().clamp(5, 30);
-    } else {
-      // Multi-day: 1 stop per 8 hours, max 50 (e.g. 10-day trip → ~30 stops)
-      stopCount = (totalHours / 8).round().clamp(6, 50);
-    }
-
     // Build waypoint entries (key stops), sorted by priority
     final waypoints = (_trackingData?.routeWaypoints ?? [])
         ..sort((a, b) => a.priority.compareTo(b.priority));
     final List<Map<String, dynamic>> waypointStops = [];
-    final Set<String> waypointNames = {};
 
     for (final wp in waypoints) {
       if (wp.lat == 0 && wp.lng == 0) continue;
@@ -3128,64 +3191,23 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         'lng': wp.lng,
         'is_key_stop': true,
       });
-      if (wp.name.isNotEmpty) waypointNames.add(_firstNameComponent(wp.name));
     }
 
-    // Use server-provided auto stops if available (identical across all apps).
-    // Fall back to client-side generation only when the server didn't return any.
-    final serverAutoPoints = _trackingData?.autoTimelinePoints ?? [];
-    final List<Map<String, dynamic>> filteredAutoStops;
-
-    if (serverAutoPoints.isNotEmpty) {
-      filteredAutoStops = serverAutoPoints
-          .where((s) {
-            final first = _firstNameComponent(s['name'] as String? ?? '');
-            return first.isNotEmpty && !waypointNames.contains(first);
-          })
-          .map((s) => {
-                'name': s['name'] as String,
-                'lat': (s['lat'] as num).toDouble(),
-                'lng': (s['lng'] as num).toDouble(),
-                'is_key_stop': false,
-                if (s['passed_at'] != null) 'passed_at': s['passed_at'] as String,
-              })
-          .toList();
-    } else {
-      final autoStops = await GoogleMapsService.generateSubStops(
-        fullPolyline: fullPolyline,
-        cumulativeDistances: cumDist,
-        startFraction: 0.0,
-        endFraction: 1.0,
-        totalDurationSeconds: totalDuration,
-        count: stopCount,
-      );
-
-      final fallbackStops = <Map<String, dynamic>>[];
-      for (final stop in autoStops) {
-        final name = (stop['name'] as String? ?? '').toLowerCase().trim();
-        if (waypointNames.contains(name) || name == 'unknown') continue;
-        final loc = stop['location'] as LatLng?;
-        if (loc == null) continue;
-        bool tooClose = false;
-        for (final wp in waypointStops) {
-          if (_haversineDistance(loc, LatLng(wp['lat'] as double, wp['lng'] as double)) < 5000) {
-            tooClose = true;
-            break;
-          }
-        }
-        if (tooClose) continue;
-        fallbackStops.add({
-          'name': stop['name'],
-          'lat': loc.latitude,
-          'lng': loc.longitude,
-          'is_key_stop': false,
-        });
-      }
-      filteredAutoStops = fallbackStops;
+    // Intermediate stops from server (auto_timeline_points)
+    final List<Map<String, dynamic>> autoStops = [];
+    for (final pt in (_trackingData?.autoTimelinePoints ?? [])) {
+      final lat = (pt['lat'] as num?)?.toDouble() ?? 0.0;
+      final lng = (pt['lng'] as num?)?.toDouble() ?? 0.0;
+      if (lat == 0 && lng == 0) continue;
+      autoStops.add({
+        'name': pt['name']?.toString() ?? 'Stop',
+        'lat': lat,
+        'lng': lng,
+        'is_key_stop': false,
+      });
     }
 
-    // Merge, order by position on the polyline
-    final allStops = [...waypointStops, ...filteredAutoStops];
+    final allStops = [...waypointStops, ...autoStops];
 
     // Sort by distance along full polyline
     for (final stop in allStops) {
@@ -3232,6 +3254,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     _fixedStops = [];
     _currentStopIndex = -1;
     _passedStopTimes = {};
+    _passedStopModes = {};
     _fullRoutePolyline = polyline;
     _fullRouteDurationSeconds = totalDurationSeconds;
 
@@ -3244,25 +3267,13 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
 
     if (mounted) setState(() => _isLoadingFixedStops = true);
 
-    // Stop count: same formula as _fetchFullRouteAndGenerateFixedStops
-    final totalHours = totalDurationSeconds / 3600.0;
-    int stopCount;
-    if (totalHours <= 1) {
-      stopCount = 3;
-    } else if (totalHours <= 3) {
-      stopCount = 4;
-    } else {
-      stopCount = totalHours.round().clamp(5, 20);
-    }
-
-    // Include only remaining (uncompleted) waypoints
+    // Include only remaining (uncompleted) route_waypoints
     final remainingWps = (_trackingData?.routeWaypoints ?? [])
         .where((wp) => wp.lat != 0 && wp.lng != 0 && !wp.isCompleted)
         .toList()
       ..sort((a, b) => a.priority.compareTo(b.priority));
 
     final List<Map<String, dynamic>> waypointStops = [];
-    final Set<String> waypointNames = {};
     for (final wp in remainingWps) {
       waypointStops.add({
         'name': wp.name.isNotEmpty ? wp.name : 'Waypoint',
@@ -3270,41 +3281,23 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         'lng': wp.lng,
         'is_key_stop': true,
       });
-      if (wp.name.isNotEmpty) waypointNames.add(wp.name.toLowerCase().trim());
     }
 
-    final autoStops = await GoogleMapsService.generateSubStops(
-      fullPolyline: polyline,
-      cumulativeDistances: cumDist,
-      startFraction: 0.0,
-      endFraction: 1.0,
-      totalDurationSeconds: totalDurationSeconds,
-      count: stopCount,
-    );
-
-    final filteredAutoStops = <Map<String, dynamic>>[];
-    for (final stop in autoStops) {
-      final name = (stop['name'] as String? ?? '').toLowerCase().trim();
-      if (waypointNames.contains(name) || name == 'unknown') continue;
-      final loc = stop['location'] as LatLng?;
-      if (loc == null) continue;
-      bool tooClose = false;
-      for (final wp in waypointStops) {
-        if (_haversineDistance(loc, LatLng(wp['lat'] as double, wp['lng'] as double)) < 5000) {
-          tooClose = true;
-          break;
-        }
-      }
-      if (tooClose) continue;
-      filteredAutoStops.add({
-        'name': stop['name'],
-        'lat': loc.latitude,
-        'lng': loc.longitude,
+    // Intermediate stops from server (auto_timeline_points)
+    final List<Map<String, dynamic>> autoStops = [];
+    for (final pt in (_trackingData?.autoTimelinePoints ?? [])) {
+      final lat = (pt['lat'] as num?)?.toDouble() ?? 0.0;
+      final lng = (pt['lng'] as num?)?.toDouble() ?? 0.0;
+      if (lat == 0 && lng == 0) continue;
+      autoStops.add({
+        'name': pt['name']?.toString() ?? 'Stop',
+        'lat': lat,
+        'lng': lng,
         'is_key_stop': false,
       });
     }
 
-    final allStops = [...waypointStops, ...filteredAutoStops];
+    final allStops = [...waypointStops, ...autoStops];
     for (final stop in allStops) {
       final sLat = stop['lat'] as double;
       final sLng = stop['lng'] as double;
@@ -3356,48 +3349,82 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       return;
     }
 
+
+
+    final totalRouteDistance = _fullRouteCumulativeDistances.isNotEmpty
+        ? _fullRouteCumulativeDistances.last
+        : 0.0;
+    final currentRouteDistance = currentFraction * totalRouteDistance;
+    const double passToleranceMeters = 5000.0;
+    const double nearStopToleranceMeters = 8000.0;
+
     int recomputedIndex = -1;
     for (int i = 0; i < _fixedStops.length; i++) {
       final stopFraction = _getStopFraction(i);
-      if (stopFraction > 0 && currentFraction >= stopFraction) {
+      final stopRouteDistance = _getStopDistanceAlongRoute(i);
+      final stopLatLng = LatLng(
+        _fixedStops[i]['lat'] as double,
+        _fixedStops[i]['lng'] as double,
+      );
+      final directDistanceToStop =
+          _haversineDistance(currentLocation, stopLatLng);
+      final hasReachedStopByRoute =
+          stopFraction > 0 &&
+              currentRouteDistance + passToleranceMeters >= stopRouteDistance;
+      final isNearStop = directDistanceToStop <= nearStopToleranceMeters;
+
+      if (hasReachedStopByRoute || isNearStop) {
         recomputedIndex = i;
       }
     }
 
-    debugPrint("📡 DRIVER LOCATION: ${currentLocation.latitude}, ${currentLocation.longitude} "
-        "(fraction=${currentFraction.toStringAsFixed(3)})");
-    debugPrint("🎯 STOP INDEX recomputed=$recomputedIndex (was=$_currentStopIndex)");
+    debugPrint(
+      "DRIVER LOCATION: ${currentLocation.latitude}, ${currentLocation.longitude} "
+      "(fraction=${currentFraction.toStringAsFixed(3)})",
+    );
+    debugPrint(
+      "STOP INDEX recomputed=$recomputedIndex (was=$_currentStopIndex)",
+    );
 
     if (recomputedIndex == _currentStopIndex) return;
 
     final now = DateTime.now();
     if (recomputedIndex > _currentStopIndex) {
-      // Forward progress — lock arrival times for newly passed stops.
-      // Priority: (1) backend passed_at, (2) interpolated fraction time,
-      // (3) DateTime.now() fallback. Avoids all stops showing the same time
-      // when the screen first loads with the driver already past N stops.
       for (int j = _currentStopIndex + 1; j <= recomputedIndex; j++) {
         if (!_passedStopTimes.containsKey(j)) {
           final stopData = _fixedStops[j];
+          final stopLatLng = LatLng(
+            stopData['lat'] as double,
+            stopData['lng'] as double,
+          );
+          final stopDistanceFromDriver =
+              _haversineDistance(currentLocation, stopLatLng);
+          _passedStopModes[j] =
+              stopDistanceFromDriver <= nearStopToleranceMeters
+                  ? 'near'
+                  : 'bypass';
+
           final passedAt = stopData['passed_at'] as String?;
           if (passedAt != null && passedAt.isNotEmpty) {
             final formatted = _formatDateTime(passedAt);
-            _passedStopTimes[j] = formatted != '-' ? formatted : _formatDateTimeObj(now);
+            _passedStopTimes[j] =
+                formatted != '-' ? formatted : _formatDateTimeObj(now);
           } else {
             final stopFraction = _getStopFraction(j);
             final dt = _computeDateTimeForFraction(stopFraction);
-            _passedStopTimes[j] = dt != null ? _formatDateTimeObj(dt) : _formatDateTimeObj(now);
+            _passedStopTimes[j] =
+                dt != null ? _formatDateTimeObj(dt) : _formatDateTimeObj(now);
           }
         }
       }
     } else {
-      // Backward correction (stale persisted state, or genuine U-turn).
-      // Purge locked times for stops that are no longer passed so the
-      // next forward crossing locks the correct time.
       for (int j = recomputedIndex + 1; j <= _currentStopIndex; j++) {
         _passedStopTimes.remove(j);
+        _passedStopModes.remove(j);
       }
-      debugPrint("↩ STOP INDEX corrected backward: $_currentStopIndex → $recomputedIndex");
+      debugPrint(
+        "STOP INDEX corrected backward: $_currentStopIndex -> $recomputedIndex",
+      );
     }
 
     setState(() => _currentStopIndex = recomputedIndex);
@@ -3432,9 +3459,14 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     try {
       final prefs = await SharedPreferences.getInstance();
       final data = _passedStopTimes.map((k, v) => MapEntry(k.toString(), v));
+      final modes = _passedStopModes.map((k, v) => MapEntry(k.toString(), v));
       await prefs.setString(
         'passed_stop_times_${widget.booking.bookingId}',
         jsonEncode(data),
+      );
+      await prefs.setString(
+        'passed_stop_modes_${widget.booking.bookingId}',
+        jsonEncode(modes),
       );
     } catch (e) {
       debugPrint('Error saving passed stop times: $e');
@@ -3454,8 +3486,21 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       // DateTime.now() in a single pass (e.g. all "2:56 PM"). Discarding
       // lets _updateProgress recompute distinct, interpolated times instead.
       if (loaded.length > 1 && loaded.values.toSet().length == 1) return;
+      final modesJson = prefs.getString(
+        'passed_stop_modes_${widget.booking.bookingId}',
+      );
+      final Map<int, String> loadedModes;
+      if (modesJson != null && modesJson.isNotEmpty) {
+        final Map<String, dynamic> decodedModes = jsonDecode(modesJson);
+        loadedModes = decodedModes.map(
+          (k, v) => MapEntry(int.parse(k), v.toString()),
+        );
+      } else {
+        loadedModes = {};
+      }
       setState(() {
         _passedStopTimes = loaded;
+        _passedStopModes = loadedModes;
       });
     } catch (e) {
       debugPrint('Error loading passed stop times: $e');
@@ -3463,6 +3508,16 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   }
 
   /// Save fixed stops to SharedPreferences.
+  /// Cache signature: driver_id + vehicle_started_date.
+  /// If either changes (driver reassigned / new trip), cached stops are stale.
+  String _fixedStopsCacheSignature() {
+    final driverId = _trackingData?.vehicleId ?? 0;
+    final startedDate = _trackingData?.pickup.updatedAt ?? '';
+    final autoCount = _trackingData?.autoTimelinePoints.length ?? 0;
+    return '${driverId}_${startedDate}_a$autoCount';
+  }
+
+  /// Save fixed stops to SharedPreferences with a cache signature.
   Future<void> _saveFixedStops() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -3479,17 +3534,31 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         'fixed_stops_${widget.booking.bookingId}',
         jsonEncode(serializable),
       );
+      await prefs.setString(
+        'fixed_stops_sig_${widget.booking.bookingId}',
+        _fixedStopsCacheSignature(),
+      );
     } catch (e) {
       debugPrint('Error saving fixed stops: $e');
     }
   }
 
   /// Load fixed stops from SharedPreferences. Returns true if loaded.
+  /// Returns false if no cache, cache is empty, or signature doesn't match
+  /// (driver/trip changed — must regenerate).
   Future<bool> _loadFixedStops() async {
-
-    
     try {
       final prefs = await SharedPreferences.getInstance();
+
+      // Validate cache signature to avoid showing stale stops from a previous trip.
+      final savedSig = prefs.getString('fixed_stops_sig_${widget.booking.bookingId}');
+      if (savedSig != _fixedStopsCacheSignature()) {
+        debugPrint('🗑 Fixed-stops cache invalidated (signature mismatch)');
+        prefs.remove('fixed_stops_${widget.booking.bookingId}');
+        prefs.remove('fixed_stops_sig_${widget.booking.bookingId}');
+        return false;
+      }
+
       final json = prefs.getString('fixed_stops_${widget.booking.bookingId}');
       if (json == null || json.isEmpty) return false;
 
@@ -3497,11 +3566,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       final stops = decoded.map((item) {
         return Map<String, dynamic>.from(item);
       }).toList();
-debugPrint("📦 Loaded Fixed Stops from storage:");
-
-for (var stop in stops) {
-  debugPrint("→ ${stop['name']}");
-}
       final deduped = _deduplicateStops(stops);
       if (deduped.isNotEmpty) {
         setState(() {
@@ -3576,6 +3640,28 @@ for (var stop in stops) {
       }
     }
     return _fullRouteCumulativeDistances[closestIdx] / _fullRouteCumulativeDistances.last;
+  }
+
+  double _getStopDistanceAlongRoute(int stopIndex) {
+    if (stopIndex < 0 || stopIndex >= _fixedStops.length) return 0.0;
+    if (_fullRoutePolyline.isEmpty || _fullRouteCumulativeDistances.isEmpty) {
+      return 0.0;
+    }
+
+    final stop = _fixedStops[stopIndex];
+    final stopLatLng = LatLng(stop['lat'] as double, stop['lng'] as double);
+
+    double minDist = double.infinity;
+    int closestIdx = 0;
+    for (int i = 0; i < _fullRoutePolyline.length; i++) {
+      final d = _haversineDistance(stopLatLng, _fullRoutePolyline[i]);
+      if (d < minDist) {
+        minDist = d;
+        closestIdx = i;
+      }
+    }
+
+    return _fullRouteCumulativeDistances[closestIdx];
   }
 
   /// Highest fraction the driver has ever reached on `_fullRoutePolyline`.
@@ -3672,58 +3758,19 @@ for (var stop in stops) {
       return baseTime.add(Duration(seconds: seconds));
     }
 
-    // Future branch: now() + speed-adaptive remaining, capped at Google Maps ETA.
-    final adaptiveRemaining = _adaptiveRemainingSeconds();
-    final effectiveRemaining = _remainingDurationSeconds > 0
-        ? min(adaptiveRemaining, _remainingDurationSeconds)
-        : adaptiveRemaining;
+    // Future branch: now() + Google's traffic-aware remaining duration.
+    // Google Directions API already accounts for traffic on all road segments
+    // ahead — no need to scale by local GPS speed (which causes jumpy ETAs).
     final routeAhead = (1.0 - currentFraction).clamp(0.0001, 1.0);
     final stopAhead = (fraction - currentFraction).clamp(0.0, 1.0);
     final secondsFromNow =
-        ((stopAhead / routeAhead) * effectiveRemaining).round();
+        ((stopAhead / routeAhead) * _remainingDurationSeconds).round();
     return DateTime.now().add(Duration(seconds: secondsFromNow));
   }
 
   String _getTimeForFraction(double fraction) {
     final dt = _computeDateTimeForFraction(fraction);
     return dt != null ? _formatDateTimeObj(dt) : '-';
-  }
-
-  /// Locally-computed remaining duration adjusted for actual driver
-  /// speed. Uses `_estimatedSpeedKmh` (computed from successive GPS
-  /// poll positions, not the backend's pre-baked field) so the ETA
-  /// reflects the truck's REAL movement, not whatever the backend
-  /// happened to think the speed was.
-  ///
-  /// Falls back to the static `_remainingDurationSeconds` when:
-  ///   - actual speed is below 5 km/h (parked / crawling — division
-  ///     by ~0 would balloon the ETA. In this case Google's static
-  ///     duration which already accounts for traffic / road
-  ///     conditions is the better number.),
-  ///   - route distance/duration metadata isn't loaded yet,
-  ///   - or the computed scale falls outside [0.5, 2.0] (clamped to
-  ///     prevent a one-off GPS spike from sending the ETA wildly off).
-  int _adaptiveRemainingSeconds() {
-    if (_remainingDurationSeconds <= 0) return _remainingDurationSeconds;
-    if (_estimatedSpeedKmh < 5) return _remainingDurationSeconds;
-    if (_fullRouteCumulativeDistances.isEmpty) return _remainingDurationSeconds;
-
-    final totalRouteMeters = _fullRouteCumulativeDistances.last;
-    final totalDurationSec = _fullRouteDurationSeconds > 0
-        ? _fullRouteDurationSeconds
-        : _totalRouteDurationSeconds;
-    if (totalRouteMeters <= 0 || totalDurationSec <= 0) {
-      return _remainingDurationSeconds;
-    }
-
-    final expectedAvgKmh = (totalRouteMeters / totalDurationSec) * 3.6;
-    if (expectedAvgKmh < 1) return _remainingDurationSeconds;
-
-    // scale > 1 → driver slower than expected → ETA grows.
-    // scale < 1 → driver faster than expected → ETA shrinks.
-    final rawScale = expectedAvgKmh / _estimatedSpeedKmh;
-    final scale = rawScale.clamp(0.5, 2.0);
-    return (_remainingDurationSeconds * scale).round();
   }
 
   /// Update the smoothed speed estimate from the latest GPS position.
@@ -3809,11 +3856,25 @@ for (var stop in stops) {
     final subStops = _subStopsCache[segmentIndex];
     if (subStops == null || subStops.isEmpty) return const SizedBox.shrink();
 
+    // Filter out sub-stops whose name duplicates either segment boundary
+    final startName = (segmentIndex - 1 >= 0 && segmentIndex - 1 < _fixedStops.length)
+        ? _firstNameComponent(_fixedStops[segmentIndex - 1]['name'] as String)
+        : '';
+    final endName = segmentIndex < _fixedStops.length
+        ? _firstNameComponent(_fixedStops[segmentIndex]['name'] as String)
+        : '';
+    final filteredSubStops = subStops.where((sub) {
+      final n = _firstNameComponent(sub['name']?.toString() ?? '');
+      return n.isNotEmpty && n != startName && n != endName;
+    }).toList();
+
+    if (filteredSubStops.isEmpty) return const SizedBox.shrink();
+
     return AnimatedSize(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOut,
       child: Column(
-        children: subStops.map((sub) {
+        children: filteredSubStops.map((sub) {
           // Prefer the server-computed ETA (includes halt-time adjustments).
           // Fall back to local fraction-based calculation if API didn't provide it.
           final apiTime = sub['estimated_arrival'] as String? ?? '';

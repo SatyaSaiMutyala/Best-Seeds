@@ -33,12 +33,12 @@ const String guardianTaskTag = 'tracking_guardian';
 // this task bypasses Doze entirely.
 //
 // Reduced from 5 min → 2 min so gap periods (service killed by OEM)
-// produce one GPS point every ~2 min instead of ~5 min. Android may
-// coalesce tasks under aggressive Doze, but signalling a 2-min target
+// produce one GPS point every ~90 s instead of ~2 min. Android may
+// coalesce tasks under aggressive Doze, but signalling a shorter target
 // gets closer to the minimum the OS will honour.
 const String activeCaptureTaskName = 'bestseeds_active_capture';
 const String activeCaptureTaskTag = 'active_capture';
-const Duration activeCaptureInterval = Duration(minutes: 2);
+const Duration activeCaptureInterval = Duration(seconds: 90);
 
 /// Initialize WorkManager and register the periodic guardian task.
 /// Call once in main() after WidgetsFlutterBinding.ensureInitialized().
@@ -92,17 +92,11 @@ Future<void> registerActiveCaptureTask({
     tag: activeCaptureTaskTag,
     initialDelay: delay,
     existingWorkPolicy: ExistingWorkPolicy.replace,
-    // Mark as expedited so Android schedules it immediately even during Doze.
-    //
-    // Regular one-off WorkManager tasks are batched to Doze "maintenance
-    // windows" which happen every 15-60 min in deep Doze — the 2-min chain
-    // interval means nothing during Doze without this flag.
-    //
-    // Expedited tasks get a JobScheduler slot outside maintenance windows.
-    // The app gets a limited quota of expedited slots per day (~10 on
-    // Android 12+). run_as_non_expedited_work_request means: if quota is
-    // exhausted, fall back to normal scheduling rather than dropping the task.
-    outOfQuotaPolicy: OutOfQuotaPolicy.run_as_non_expedited_work_request,
+    // NOTE: outOfQuotaPolicy (expedited) is intentionally NOT set here.
+    // Android WorkManager forbids expedited tasks from having an initialDelay —
+    // combining both throws IllegalArgumentException at runtime. The initialDelay
+    // is required for the sub-15-min chain pattern, so we skip the expedited flag.
+    // Doze-bypass is handled by the guardian periodic task and the foreground service.
     constraints: Constraints(
       networkType: NetworkType.not_required,
       requiresBatteryNotLow: false,

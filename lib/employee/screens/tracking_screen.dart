@@ -348,6 +348,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      useSafeArea: true,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
@@ -817,13 +818,37 @@ class _TrackingScreenState extends State<TrackingScreen> {
               ],
             ),
 
-          // Address - only show if droppingLocation is not empty
+          // Start location - green
+          if (booking.driverDetails.vehicleStartAddress != null &&
+              booking.driverDetails.vehicleStartAddress!.isNotEmpty) ...[
+            SizedBox(height: height * 0.01),
+            Row(
+              children: [
+                Icon(Icons.location_on,
+                    size: width * 0.04, color: Colors.green),
+                SizedBox(width: width * 0.02),
+                Expanded(
+                  child: Text(
+                    booking.driverDetails.vehicleStartAddress!,
+                    style: TextStyle(
+                      fontSize: width * 0.038,
+                      color: Colors.grey.shade700,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // Drop location - red
           if (booking.droppingLocation.isNotEmpty) ...[
             SizedBox(height: height * 0.01),
             Row(
               children: [
-                Icon(Icons.location_on_outlined,
-                    size: width * 0.04, color: Colors.grey),
+                Icon(Icons.location_on,
+                    size: width * 0.04, color: Colors.red),
                 SizedBox(width: width * 0.02),
                 Expanded(
                   child: Text(

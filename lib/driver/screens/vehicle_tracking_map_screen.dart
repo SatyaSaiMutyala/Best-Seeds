@@ -93,6 +93,20 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   List<LatLng> _fullPolyline = [];
   List<double> _cumulativeDistances = [];
 
+  // Segment-based snapping: tracks which segment the driver is on.
+  // Grows forward-only so green/blue split stays stable.
+  int _currentSegmentIndex = 0;
+
+  // Snap pipeline state (mirrors employee screen)
+  LatLng? _lastAcceptedSnap;
+  LatLng? _lastAcceptedRaw;
+  LatLng? _snapCacheInput;
+  LatLng? _snapCacheOutput;
+
+  // Historical green path preserved across reroutes so the completed
+  // line never collapses to a stub after the driver diverts.
+  final List<LatLng> _preservedGreenPath = [];
+
   // Expandable sub-timelines
   int? _expandedSegmentIndex;
   Map<int, List<Map<String, dynamic>>> _subStopsCache = {};

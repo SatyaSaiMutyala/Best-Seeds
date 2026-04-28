@@ -557,171 +557,175 @@ class _BookingScreenState extends State<BookingScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      useSafeArea: true,
       builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return Container(
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(20),
-                  topRight: Radius.circular(20),
+        return SafeArea(
+          top: false,
+          child: StatefulBuilder(
+            builder: (context, setModalState) {
+              return Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(20),
+                    topRight: Radius.circular(20),
+                  ),
                 ),
-              ),
-              padding: EdgeInsets.all(width * 0.05),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Filters',
-                        style: TextStyle(
-                          fontSize: width * 0.05,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          setModalState(() {
-                            _selectedBookingType = null;
-                            _selectedVehicleAvailability = null;
-                          });
-                        },
-                        child: Text(
-                          'Clear All',
+                padding: EdgeInsets.all(width * 0.05),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Filters',
                           style: TextStyle(
-                            color: const Color(0xFF0077C8),
-                            fontSize: width * 0.04,
+                            fontSize: width * 0.05,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () {
+                            setModalState(() {
+                              _selectedBookingType = null;
+                              _selectedVehicleAvailability = null;
+                            });
+                          },
+                          child: Text(
+                            'Clear All',
+                            style: TextStyle(
+                              color: const Color(0xFF0077C8),
+                              fontSize: width * 0.04,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: width * 0.04),
+
+                    // Booking Type Filter
+                    Text(
+                      'Booking Type',
+                      style: TextStyle(
+                        fontSize: width * 0.042,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: width * 0.02),
+                    Wrap(
+                      spacing: width * 0.02,
+                      children: [
+                        _buildFilterChip(
+                          label: 'All',
+                          isSelected: _selectedBookingType == null,
+                          onTap: () =>
+                              setModalState(() => _selectedBookingType = null),
+                          width: width,
+                        ),
+                        _buildFilterChip(
+                          label: 'Spot Hatchery',
+                          isSelected: _selectedBookingType == 'spot',
+                          onTap: () =>
+                              setModalState(() => _selectedBookingType = 'spot'),
+                          width: width,
+                        ),
+                        _buildFilterChip(
+                          label: 'Hatchery',
+                          isSelected: _selectedBookingType == 'hatchery',
+                          onTap: () => setModalState(
+                              () => _selectedBookingType = 'hatchery'),
+                          width: width,
+                        ),
+                        _buildFilterChip(
+                          label: 'Vehicle',
+                          isSelected: _selectedBookingType == 'vehicle',
+                          onTap: () => setModalState(
+                              () => _selectedBookingType = 'vehicle'),
+                          width: width,
+                        ),
+                        _buildFilterChip(
+                          label: 'Vehicle Availability',
+                          isSelected:
+                              _selectedBookingType == 'vehicle_availability',
+                          onTap: () => setModalState(() =>
+                              _selectedBookingType = 'vehicle_availability'),
+                          width: width,
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: width * 0.05),
+
+                    // Vehicle Availability Filter
+                    Text(
+                      'Vehicle Availability',
+                      style: TextStyle(
+                        fontSize: width * 0.042,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: width * 0.02),
+                    Wrap(
+                      spacing: width * 0.02,
+                      children: [
+                        _buildFilterChip(
+                          label: 'All',
+                          isSelected: _selectedVehicleAvailability == null,
+                          onTap: () => setModalState(
+                              () => _selectedVehicleAvailability = null),
+                          width: width,
+                        ),
+                        _buildFilterChip(
+                          label: 'Driver Assigned',
+                          isSelected: _selectedVehicleAvailability == 'assigned',
+                          onTap: () => setModalState(
+                              () => _selectedVehicleAvailability = 'assigned'),
+                          width: width,
+                        ),
+                        _buildFilterChip(
+                          label: 'No Driver',
+                          isSelected:
+                              _selectedVehicleAvailability == 'not_assigned',
+                          onTap: () => setModalState(() =>
+                              _selectedVehicleAvailability = 'not_assigned'),
+                          width: width,
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: width * 0.06),
+
+                    // Apply Button
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          _loadBookings(); // Reload with server-side filters
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF0077C8),
+                          padding: EdgeInsets.symmetric(vertical: width * 0.04),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: Text(
+                          'Apply Filters',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: width * 0.045,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
-                    ],
-                  ),
-                  SizedBox(height: width * 0.04),
-
-                  // Booking Type Filter
-                  Text(
-                    'Booking Type',
-                    style: TextStyle(
-                      fontSize: width * 0.042,
-                      fontWeight: FontWeight.w600,
                     ),
-                  ),
-                  SizedBox(height: width * 0.02),
-                  Wrap(
-                    spacing: width * 0.02,
-                    children: [
-                      _buildFilterChip(
-                        label: 'All',
-                        isSelected: _selectedBookingType == null,
-                        onTap: () =>
-                            setModalState(() => _selectedBookingType = null),
-                        width: width,
-                      ),
-                      _buildFilterChip(
-                        label: 'Spot Hatchery',
-                        isSelected: _selectedBookingType == 'spot',
-                        onTap: () =>
-                            setModalState(() => _selectedBookingType = 'spot'),
-                        width: width,
-                      ),
-                      _buildFilterChip(
-                        label: 'Hatchery',
-                        isSelected: _selectedBookingType == 'hatchery',
-                        onTap: () => setModalState(
-                            () => _selectedBookingType = 'hatchery'),
-                        width: width,
-                      ),
-                      _buildFilterChip(
-                        label: 'Vehicle',
-                        isSelected: _selectedBookingType == 'vehicle',
-                        onTap: () => setModalState(
-                            () => _selectedBookingType = 'vehicle'),
-                        width: width,
-                      ),
-                      _buildFilterChip(
-                        label: 'Vehicle Availability',
-                        isSelected:
-                            _selectedBookingType == 'vehicle_availability',
-                        onTap: () => setModalState(() =>
-                            _selectedBookingType = 'vehicle_availability'),
-                        width: width,
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: width * 0.05),
-
-                  // Vehicle Availability Filter
-                  Text(
-                    'Vehicle Availability',
-                    style: TextStyle(
-                      fontSize: width * 0.042,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  SizedBox(height: width * 0.02),
-                  Wrap(
-                    spacing: width * 0.02,
-                    children: [
-                      _buildFilterChip(
-                        label: 'All',
-                        isSelected: _selectedVehicleAvailability == null,
-                        onTap: () => setModalState(
-                            () => _selectedVehicleAvailability = null),
-                        width: width,
-                      ),
-                      _buildFilterChip(
-                        label: 'Driver Assigned',
-                        isSelected: _selectedVehicleAvailability == 'assigned',
-                        onTap: () => setModalState(
-                            () => _selectedVehicleAvailability = 'assigned'),
-                        width: width,
-                      ),
-                      _buildFilterChip(
-                        label: 'No Driver',
-                        isSelected:
-                            _selectedVehicleAvailability == 'not_assigned',
-                        onTap: () => setModalState(() =>
-                            _selectedVehicleAvailability = 'not_assigned'),
-                        width: width,
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: width * 0.06),
-
-                  // Apply Button
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _loadBookings(); // Reload with server-side filters
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF0077C8),
-                        padding: EdgeInsets.symmetric(vertical: width * 0.04),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: Text(
-                        'Apply Filters',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: width * 0.045,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-                  SizedBox(height: width * 0.02),
-                ],
-              ),
-            );
-          },
+                    SizedBox(height: width * 0.02),
+                  ],
+                ),
+              );
+            },
+          ),
         );
       },
     );
@@ -1136,13 +1140,37 @@ class _BookingScreenState extends State<BookingScreen> {
               ],
             ),
 
-          // Address - only show if droppingLocation is not empty
+          // Start location - green
+          if (booking.driverDetails.vehicleStartAddress != null &&
+              booking.driverDetails.vehicleStartAddress!.isNotEmpty) ...[
+            SizedBox(height: height * 0.01),
+            Row(
+              children: [
+                Icon(Icons.location_on,
+                    size: width * 0.04, color: Colors.green),
+                SizedBox(width: width * 0.02),
+                Expanded(
+                  child: Text(
+                    booking.driverDetails.vehicleStartAddress!,
+                    style: TextStyle(
+                      fontSize: width * 0.038,
+                      color: Colors.grey.shade700,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // Drop location - red
           if (booking.droppingLocation.isNotEmpty) ...[
             SizedBox(height: height * 0.01),
             Row(
               children: [
-                Icon(Icons.location_on_outlined,
-                    size: width * 0.04, color: Colors.grey),
+                Icon(Icons.location_on,
+                    size: width * 0.04, color: Colors.red),
                 SizedBox(width: width * 0.02),
                 Expanded(
                   child: Text(

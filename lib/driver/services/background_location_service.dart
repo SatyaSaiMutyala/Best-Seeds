@@ -4,11 +4,14 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'tracking_database.dart';
 import 'tracking_logger.dart';
@@ -29,7 +32,7 @@ const String _tokenKey = 'driver_token';
 const String _serviceRunningKey = 'bg_location_service_running';
 
 // Notification channel constants — silent foreground service notification
-const String _notificationChannelId = 'bestseeds_location_channel';
+const String _notificationChannelId = 'bestseeds_location_v2';
 const String _notificationChannelName = 'Location Tracking';
 const int _notificationId = 888;
 
@@ -41,23 +44,26 @@ const String _alertChannelName = 'Tracking Alerts';
 const int _alertNotificationId = 889;
 
 // Watchdog constants
-// Shortened from 3 min → 1 min and 5 min → 3 min so silent stream
-// deaths are caught within a single minute instead of three. The Timer
-// based watchdog only matters while the CPU is awake; when Doze kicks
-// in, the WorkManager active-capture chain (fires every 5 min) takes
-// over as the secondary update source — see tracking_work_manager.dart.
+// _streamTimeout: how long the stream must be silent before watchdog restarts it.
+//   Reduced 3 min → 90 s so OEM-throttled streams are caught within one watchdog tick.
+// _fallbackPollInterval: how often the fallback timer fires.
+//   Reduced 2 min → 60 s so there is always a position attempt every ~60 s.
+// _fallbackGuard: fallback skips if the stream delivered a position within this window.
+//   Reduced from the old inline 3-min to 90 s so fallback kicks in sooner.
+// Together these reduce the worst-case gap from ~6 min to ~90 s.
 const Duration _watchdogInterval = Duration(minutes: 1);
-const Duration _streamTimeout = Duration(minutes: 3);
-const Duration _fallbackPollInterval = Duration(minutes: 2);
+const Duration _streamTimeout = Duration(seconds: 90);
+const Duration _fallbackPollInterval = Duration(seconds: 60);
+const Duration _fallbackGuard = Duration(seconds: 90);   // replaces old inline 3-min guard
 const Duration _connectivityCheckInterval = Duration(seconds: 30);
 const Duration _maxStalePositionAge = Duration(minutes: 10);
 const Duration _dbCleanupInterval = Duration(hours: 1);
 const Duration _movingUpdateInterval = Duration(seconds: 10);
 const Duration _stoppedHeartbeatInterval = Duration(seconds: 15);
-const Duration _reverseGeocodeRefreshInterval = Duration(minutes: 5);
+const Duration _reverseGeocodeRefreshInterval = Duration(minutes: 3);  // was 5 min
 const double _minMovementMetersForSend = 10;
 const double _significantMovementMetersForSend = 150;
-const double _reverseGeocodeRefreshMeters = 400;
+const double _reverseGeocodeRefreshMeters = 300;  // was 400 m — refresh after 300 m
 
 class BackgroundLocationService {
   static final FlutterBackgroundService _service = FlutterBackgroundService();
@@ -122,6 +128,7 @@ class BackgroundLocationService {
     TrackingLogger.log('▶ service.start() requested');
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_serviceRunningKey, true);
+    await _prepareAndroidBackgroundExecution();
 
     final isRunning = await _service.isRunning();
     if (!isRunning) {
@@ -178,6 +185,7 @@ class BackgroundLocationService {
     final running = await isRunning();
     if (shouldRun && !running) {
       print('BackgroundLocationService: Service was killed, restarting...');
+      await _prepareAndroidBackgroundExecution();
       await _service.startService();
       // Verify it actually started
       await Future.delayed(const Duration(seconds: 2));
@@ -195,6 +203,24 @@ class BackgroundLocationService {
       await registerActiveCaptureTask();
     }
   }
+
+  static Future<void> _prepareAndroidBackgroundExecution() async {
+    if (!Platform.isAndroid) return;
+    // Battery optimization exemption is requested in _ensureBatteryOptimizationExemption()
+    // before the journey starts (in the UI layer). Calling request() here would
+    // show the system dialog a second time after the API already succeeded.
+    // We only check status — if not granted the service still runs, just with
+    // potentially more aggressive battery management on some OEMs.
+    try {
+      final batteryStatus = await Permission.ignoreBatteryOptimizations.status;
+      if (!batteryStatus.isGranted) {
+        print('BackgroundLocationService: Battery optimization not exempted — '
+            'service may be killed on aggressive OEM ROMs.');
+      }
+    } catch (e) {
+      print('BackgroundLocationService: Battery status check failed: $e');
+    }
+  }
 }
 
 // =============================================================================
@@ -207,6 +233,18 @@ class BackgroundLocationService {
 Future<void> _onStart(ServiceInstance service) async {
   // Required for plugins to work in background isolate
   DartPluginRegistrant.ensureInitialized();
+  try {
+    await WakelockPlus.enable();
+    print('BackgroundLocationService: Wake lock enabled.');
+  } catch (e) {
+    print('BackgroundLocationService: Failed to enable wake lock: $e');
+  }
+
+  // Initialise file logger — creates/appends to
+  // <externalStorage>/tracking_YYYY-MM-DD.log
+  // Pull after a journey: adb pull <path printed below>
+  await TrackingLogger.init();
+  TrackingLogger.log('▶ _onStart isolate started — log file: ${TrackingLogger.logFilePath}');
 
   // Re-register WorkManager tasks immediately on every service start.
   //
@@ -242,6 +280,15 @@ Future<void> _onStart(ServiceInstance service) async {
   Timer? connectivityCheckTimer;
   Timer? dbCleanupTimer;
 
+  Future<void> releaseWakeLock() async {
+    try {
+      await WakelockPlus.disable();
+      print('BackgroundLocationService: Wake lock disabled.');
+    } catch (e) {
+      print('BackgroundLocationService: Failed to disable wake lock: $e');
+    }
+  }
+
   // Track when the last FRESH position was received from the stream.
   // Only updated when the position moves > 2m — frozen/identical positions
   // do NOT reset this, so the watchdog can detect a stale stream.
@@ -269,8 +316,11 @@ Future<void> _onStart(ServiceInstance service) async {
   const int frozenStreamRestartThreshold = 9;        // ~90 s at 10 s intervals
   const double frozenPositionThresholdMeters = 2.0;  // metres — real GPS noise < this
 
-  // Track alert state — use timestamp cooldown so alerts repeat every 3 minutes
-  DateTime? lastAlertTime;
+  // Per-issue-type cooldowns so a GPS alert does not block an internet alert
+  // and vice versa. Key = issue_type string, value = time it was last fired.
+  final Map<String, DateTime> alertCooldowns = {};
+  // Keep legacy reference so dismissErrorAlert can clear all cooldowns at once.
+  DateTime? lastAlertTime; // only used for backward-compat dismiss logic below
 
   // Connectivity & retry state
   bool isOnline = true;
@@ -338,6 +388,7 @@ Future<void> _onStart(ServiceInstance service) async {
     dbCleanupTimer?.cancel();
     // Dismiss any active alert when stopping
     alertNotifications.cancel(_alertNotificationId);
+    releaseWakeLock();
     service.stopSelf();
   });
 
@@ -349,6 +400,46 @@ Future<void> _onStart(ServiceInstance service) async {
         content: content,
       );
     }
+    // Re-post via FlutterLocalNotificationsPlugin with the same notification ID.
+    // setForegroundNotificationInfo() updates the service notification internally,
+    // but Android can keep showing a stale snapshot on the lock screen.
+    // Re-posting with NotificationVisibility.public forces the lock screen to
+    // refresh and show the new location text even while the screen is locked.
+    alertNotifications.show(
+      _notificationId,
+      'Bestseed - Delivering',
+      content,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _notificationChannelId,
+          _notificationChannelName,
+          importance: Importance.defaultImportance,
+          priority: Priority.defaultPriority,
+          ongoing: true,
+          autoCancel: false,
+          onlyAlertOnce: true,
+          visibility: NotificationVisibility.public,
+          enableVibration: false,
+          playSound: false,
+        ),
+      ),
+    );
+  }
+
+  String _gpsAgeText() {
+    if (lastSentAt == null) return 'waiting for GPS';
+    final age = DateTime.now().difference(lastSentAt!);
+    if (age.inSeconds < 90) return 'GPS just now';
+    if (age.inMinutes < 60) return 'GPS ${age.inMinutes}m ago';
+    return 'GPS ${age.inHours}h ago';
+  }
+
+  String trackingNotificationContent() {
+    final locationPart = lastResolvedLocationName != null &&
+            lastResolvedLocationName!.trim().isNotEmpty
+        ? lastResolvedLocationName!
+        : 'Tracking active';
+    return '$locationPart • ${_gpsAgeText()}';
   }
 
   // ---------- Helper: send tracking alert to backend (notifies vendor + admin) ----------
@@ -375,29 +466,42 @@ Future<void> _onStart(ServiceInstance service) async {
   }
 
   // ---------- Helper: show a loud alert notification ----------
-  // Uses a 3-minute cooldown so alerts repeat periodically while GPS/internet
-  // stays off, instead of firing only once.
+  // Each issue type has its own 3-minute cooldown so a GPS alert never
+  // blocks an internet or battery alert from firing at the same time.
   Future<void> showErrorAlert({
     required String title,
     required String body,
+    String? alertType,
   }) async {
     if (shouldStop) return;
 
-    // Allow alert if: first time, OR 3+ minutes since last alert
-    if (lastAlertTime != null) {
-      final sinceLastAlert = DateTime.now().difference(lastAlertTime!);
-      if (sinceLastAlert < const Duration(minutes: 3)) {
-        print('BackgroundLocationService: Alert cooldown — '
-            '${sinceLastAlert.inSeconds}s since last alert, skipping.');
+    // Derive the canonical issue type used as the cooldown key and for the
+    // backend alert. Caller can pass alertType explicitly; otherwise we infer
+    // from the title (preserves backward compatibility with existing call sites).
+    final issueType = alertType ??
+        (title.contains('GPS')
+            ? 'gps_off'
+            : title.contains('Battery')
+                ? 'battery_low'
+                : title.contains('Location Not')
+                    ? 'location_not_sending'
+                    : 'internet_off');
+
+    // Per-type cooldown — 3 minutes between repeated alerts of the same type.
+    final lastFired = alertCooldowns[issueType];
+    if (lastFired != null) {
+      final since = DateTime.now().difference(lastFired);
+      if (since < const Duration(minutes: 3)) {
+        print('BackgroundLocationService: Alert cooldown ($issueType) — '
+            '${since.inSeconds}s, skipping.');
         return;
       }
     }
 
-    lastAlertTime = DateTime.now();
-    print('BackgroundLocationService: ALERT — $title: $body');
+    alertCooldowns[issueType] = DateTime.now();
+    lastAlertTime = DateTime.now(); // kept for dismissErrorAlert
+    print('BackgroundLocationService: ALERT [$issueType] — $title: $body');
 
-    // Determine issue type from title and notify vendor + admin via backend
-    final issueType = title.contains('GPS') ? 'gps_off' : 'internet_off';
     sendTrackingAlert(issueType); // fire-and-forget, don't await
 
     // FLAG_INSISTENT (4) makes the default notification sound loop continuously
@@ -429,10 +533,14 @@ Future<void> _onStart(ServiceInstance service) async {
     });
   }
 
-  // ---------- Helper: dismiss the alert when issue is resolved ----------
+  // ---------- Helper: dismiss connectivity/GPS alerts when issue is resolved ----------
+  // Only clears the internet_off and gps_off cooldowns so battery_low and
+  // location_not_sending alerts can still fire independently.
   Future<void> dismissErrorAlert() async {
     if (lastAlertTime == null) return;
     lastAlertTime = null;
+    alertCooldowns.remove('internet_off');
+    alertCooldowns.remove('gps_off');
     await alertNotifications.cancel(_alertNotificationId);
     print('BackgroundLocationService: Alert dismissed — issue resolved.');
   }
@@ -446,9 +554,15 @@ Future<void> _onStart(ServiceInstance service) async {
         locationName: locationName,
       );
       final count = await TrackingDatabase.getUnsentCount();
+      TrackingLogger.log(
+          'queue   lat=${position.latitude.toStringAsFixed(6)} '
+          'lng=${position.longitude.toStringAsFixed(6)} '
+          'acc=${position.accuracy.toStringAsFixed(0)}m '
+          'pending=$count');
       print('BackgroundLocationService: Queued position to SQLite '
           '($count unsent in queue)');
     } catch (e) {
+      TrackingLogger.log('✗ queue  error: $e');
       print('BackgroundLocationService: SQLite queue failed: $e');
     }
   }
@@ -505,7 +619,7 @@ Future<void> _onStart(ServiceInstance service) async {
         TrackingLogger.log('✓ flush  ${unsent.length} points accepted by server');
         print('BackgroundLocationService: Batch flush successful (${unsent.length} points).');
       } else {
-        TrackingLogger.log('✗ flush  http=${response.statusCode}');
+        TrackingLogger.log('✗ flush  http=${response.statusCode} pending=${unsent.length}');
         print('BackgroundLocationService: Batch flush failed: ${response.statusCode}');
       }
     } catch (e) {
@@ -525,23 +639,46 @@ Future<void> _onStart(ServiceInstance service) async {
 
   bool shouldSendPosition(Position position) {
     final now = DateTime.now();
+    final sinceLastSend = lastSentAt == null
+        ? const Duration(days: 1)
+        : now.difference(lastSentAt!);
 
     // ── Reject low-accuracy positions (cell tower / WiFi triangulation) ──
     // Real GPS accuracy: 5-30m. Cell tower: 300-2000m. WiFi: 50-200m.
     // Positions with accuracy > 100m are NOT real GPS — they cause ghost
     // locations (e.g. phone shows Madhapur but driver is at Borabanda).
     if (position.accuracy > 100) {
-      print('BackgroundLocationService: Rejected low-accuracy position '
-          '(accuracy=${position.accuracy.toStringAsFixed(0)}m) — '
-          'likely cell tower/WiFi, not real GPS');
-      return false;
+      final allowDegradedAccuracy =
+          sinceLastSend >= const Duration(seconds: 60) &&
+              position.accuracy <= 500;
+      if (allowDegradedAccuracy) {
+        TrackingLogger.log(
+            'coarse  acc=${position.accuracy.toStringAsFixed(0)}m '
+            'silent=${sinceLastSend.inSeconds}s -> allow');
+        print('BackgroundLocationService: Allowing degraded-accuracy position '
+            '(accuracy=${position.accuracy.toStringAsFixed(0)}m, '
+            'silentFor=${sinceLastSend.inSeconds}s)');
+      } else {
+        TrackingLogger.log(
+            'coarse  acc=${position.accuracy.toStringAsFixed(0)}m '
+            'silent=${sinceLastSend.inSeconds}s -> reject');
+        print('BackgroundLocationService: Rejected low-accuracy position '
+            '(accuracy=${position.accuracy.toStringAsFixed(0)}m) - '
+            'likely cell tower/WiFi, not real GPS');
+        if (lastResolvedLocationName != null) {
+          updateNotification('Tracking active... ($lastResolvedLocationName)');
+        } else {
+          updateNotification('Tracking active... (poor GPS signal)');
+        }
+        return false;
+      }
     }
+
 
     if (lastSentAt == null || lastSentPosition == null) {
       return true;
     }
 
-    final sinceLastSend = now.difference(lastSentAt!);
     final movedMeters = distanceBetweenPositions(lastSentPosition!, position);
 
     // ── Reject sudden jumps from cached/stale positions ──
@@ -596,6 +733,12 @@ Future<void> _onStart(ServiceInstance service) async {
       }
     }
 
+    // How far the driver has moved since the last successful geocode.
+    // Used below to decide whether to clear the stale name on failure.
+    final distFromAnchor = lastReverseGeocodedPosition == null
+        ? double.infinity
+        : distanceBetweenPositions(lastReverseGeocodedPosition!, position);
+
     try {
       final resolved = await reverseGeocodeHttp(
         position.latitude,
@@ -604,14 +747,23 @@ Future<void> _onStart(ServiceInstance service) async {
       if (resolved != null && resolved.isNotEmpty) {
         lastResolvedLocationName = resolved;
         // Only advance the cache anchor when geocoding actually succeeded.
-        // If we always advance on failure, the next call sees "moved < 400m
-        // from failed-geocode position AND fresh < 5min" → returns the OLD
-        // city name instead of retrying. Driver stays stuck showing wrong
-        // city until they move 400m from where the failed geocode was tried.
+        // If we always advance on failure, the next call sees "moved < 300m
+        // from failed-geocode position AND fresh < 3min" → returns the OLD
+        // city name instead of retrying.
         lastReverseGeocodedPosition = position;
         lastReverseGeocodedAt = now;
+      } else if (distFromAnchor > 1000) {
+        // Geocode returned no result AND driver moved > 1 km from the last
+        // successful geocode — the cached name is stale. Clear it so the
+        // notification shows "Tracking active" instead of the wrong city.
+        lastResolvedLocationName = null;
       }
-    } catch (_) {}
+    } catch (_) {
+      // Geocode failed — if driver has moved significantly, clear stale name.
+      if (distFromAnchor > 1000) {
+        lastResolvedLocationName = null;
+      }
+    }
 
     return lastResolvedLocationName;
   }
@@ -643,7 +795,42 @@ Future<void> _onStart(ServiceInstance service) async {
       TrackingLogger.log(
           'filter  lat=${position.latitude.toStringAsFixed(6)} '
           'lng=${position.longitude.toStringAsFixed(6)} '
-          'acc=${position.accuracy.toStringAsFixed(0)}m (throttled)');
+          'acc=${position.accuracy.toStringAsFixed(0)}m '
+          'silent=${lastSentAt == null ? 'first' : DateTime.now().difference(lastSentAt!).inSeconds}s '
+          '(throttled)');
+
+      // ── Poor-GPS geocode refresh (the 6-min stale notification fix) ──
+      // When accuracy > 100m (cell tower / WiFi position), shouldSendPosition
+      // rejects the position for backend sends and shows the notification with
+      // the OLD lastResolvedLocationName. If the driver has been in poor-GPS
+      // conditions for minutes (tunnel, building, city overpass), that name can
+      // be from far behind their current position.
+      //
+      // Fix: attempt a fresh geocode every 1 minute using the medium-accuracy
+      // cell-tower position. Cell towers give ~100-500m accuracy — good enough
+      // for city-level display in the notification. Backend location update is
+      // still skipped (accuracy > 100m guard above stays in place).
+      if (position.accuracy > 100) {
+        final now = DateTime.now();
+        final timeSinceLastGeocode = lastReverseGeocodedAt == null
+            ? const Duration(hours: 1)
+            : now.difference(lastReverseGeocodedAt!);
+        if (timeSinceLastGeocode >= const Duration(minutes: 1)) {
+          try {
+            final name =
+                await reverseGeocodeHttp(position.latitude, position.longitude);
+            if (name != null && name.isNotEmpty) {
+              lastResolvedLocationName = name;
+              lastReverseGeocodedPosition = position;
+              lastReverseGeocodedAt = now;
+              updateNotification('Tracking active… ($name)');
+              TrackingLogger.log('📍 poor-gps geocode → $name '
+                  '(acc=${position.accuracy.toStringAsFixed(0)}m)');
+            }
+          } catch (_) {}
+        }
+      }
+
       return true;
     }
 
@@ -655,7 +842,7 @@ Future<void> _onStart(ServiceInstance service) async {
         '→ send   lat=${position.latitude.toStringAsFixed(6)} '
         'lng=${position.longitude.toStringAsFixed(6)} '
         'acc=${position.accuracy.toStringAsFixed(0)}m '
-        'since=$sinceLastSent');
+        'since=$sinceLastSent queue-before-send');
     print('BackgroundLocationService: Position -> '
         'lat=${position.latitude}, lng=${position.longitude}');
 
@@ -713,25 +900,32 @@ Future<void> _onStart(ServiceInstance service) async {
         isOnline = true;
         await TrackingDatabase.markAllSent();
         await dismissErrorAlert();
+        await prefs.setInt(
+            'last_location_sent_at', DateTime.now().millisecondsSinceEpoch);
         TrackingLogger.log(
             '✓ sent   lat=${position.latitude.toStringAsFixed(6)} '
             'lng=${position.longitude.toStringAsFixed(6)} '
-            'http=${response.statusCode} in ${elapsedMs}ms');
+            'acc=${position.accuracy.toStringAsFixed(0)}m http=${response.statusCode} in ${elapsedMs}ms');
 
-        // Only show a place name if the GPS fix is fresh (< 30s old).
-        // FLP cached positions after service restart often have good claimed
-        // accuracy (< 100m) but carry a timestamp from the last fix before
-        // the service died — that old position may be in a different city.
-        // Showing "Tracking active..." until a fresh fix arrives avoids
-        // briefly displaying a wrong place name (e.g. Polekurru when the
-        // driver is already at Yanam bridge).
-        final fixAge = DateTime.now().difference(position.timestamp);
-        final notifContent = fixAge.inSeconds <= 30 && locationName != null
-            ? 'Location: $locationName'
-            : 'Tracking active...';
-        updateNotification(notifContent);
+        // Show location name when geocode is for the current area.
+        // resolveLocationName() returns lastResolvedLocationName on failure
+        // (the cached old city). If the geocode anchor is > 300m away from
+        // the current position the name is stale, so we show "Tracking
+        // active..." instead of the wrong city name.
+        //
+        // NOTE: fixAge (DateTime.now() - position.timestamp) was removed.
+        // On Android, position.timestamp reflects when the GPS hardware locked
+        // the satellite signal, which can be 30–120 s behind DateTime.now()
+        // even on a live stream. The old fixAge <= 30s guard was causing the
+        // location name to never appear in the notification because almost
+        // every fix failed the freshness check. isGeocodeForCurrentArea
+        // already provides the same "don't show stale city" safety.
         lastSentPosition = position;
         lastSentAt = DateTime.now();
+        // trackingNotificationContent() uses lastResolvedLocationName (which
+        // resolveLocationName() already cleared if geocode failed + moved > 1km)
+        // and appends the GPS age so the driver can see how fresh the fix is.
+        updateNotification(trackingNotificationContent());
 
         service.invoke('locationUpdate', {
           'lat': position.latitude,
@@ -744,7 +938,7 @@ Future<void> _onStart(ServiceInstance service) async {
       } else {
         TrackingLogger.log(
             '✗ http=${response.statusCode} fails=$consecutiveFailures '
-            'in ${elapsedMs}ms');
+            'acc=${position.accuracy.toStringAsFixed(0)}m in ${elapsedMs}ms');
         print(
             'BackgroundLocationService: API error ${response.statusCode}');
         consecutiveFailures++;
@@ -752,7 +946,7 @@ Future<void> _onStart(ServiceInstance service) async {
       }
     } on TimeoutException {
       TrackingLogger.log(
-          '✗ timeout fails=${consecutiveFailures + 1} (12s http timeout)');
+          '✗ timeout fails=${consecutiveFailures + 1} acc=${position.accuracy.toStringAsFixed(0)}m (12s http timeout)');
       print('BackgroundLocationService: API call timed out, will retry.');
       consecutiveFailures++;
       updateNotification('Slow network - retrying...');
@@ -770,7 +964,7 @@ Future<void> _onStart(ServiceInstance service) async {
       }
     } catch (e) {
       TrackingLogger.log(
-          '✗ neterr fails=${consecutiveFailures + 1} $e');
+          '✗ neterr fails=${consecutiveFailures + 1} acc=${position.accuracy.toStringAsFixed(0)}m $e');
       print('BackgroundLocationService: Network error: $e');
       consecutiveFailures++;
       updateNotification('Network issue - retrying...');
@@ -890,6 +1084,7 @@ Future<void> _onStart(ServiceInstance service) async {
             watchdogTimer?.cancel();
             fallbackTimer?.cancel();
             dbCleanupTimer?.cancel();
+            await releaseWakeLock();
             service.stopSelf();
           }
         } catch (e, stack) {
@@ -917,10 +1112,12 @@ Future<void> _onStart(ServiceInstance service) async {
   Future<void> fallbackPoll() async {
     if (shouldStop) return;
 
-    // Skip if the stream delivered a position recently (within 3 minutes)
+    // Skip if the stream delivered a position recently (within _fallbackGuard = 90 s).
+    // Reduced from the old 3-min guard so fallback fires within ~90 s of stream death
+    // instead of waiting up to 3 min — this is the main fix for the 5-min gap.
     final timeSinceLastStream =
         DateTime.now().difference(lastStreamPositionTime);
-    if (timeSinceLastStream < const Duration(minutes: 3)) {
+    if (timeSinceLastStream < _fallbackGuard) {
       print('BackgroundLocationService: Fallback skipped — stream is alive '
           '(last ${timeSinceLastStream.inSeconds}s ago)');
       return;
@@ -975,6 +1172,7 @@ Future<void> _onStart(ServiceInstance service) async {
           watchdogTimer?.cancel();
           fallbackTimer?.cancel();
           dbCleanupTimer?.cancel();
+          await releaseWakeLock();
           service.stopSelf();
         }
       }
@@ -1007,6 +1205,7 @@ Future<void> _onStart(ServiceInstance service) async {
     if (firstPos != null && !shouldStop) {
       final keepRunning = await sendPosition(firstPos);
       if (!keepRunning) {
+        await releaseWakeLock();
         service.stopSelf();
         return;
       }
@@ -1049,6 +1248,7 @@ Future<void> _onStart(ServiceInstance service) async {
         dbCleanupTimer?.cancel();
         timer.cancel();
         await alertNotifications.cancel(_alertNotificationId);
+        await releaseWakeLock();
         service.stopSelf();
         return;
       }
@@ -1062,9 +1262,51 @@ Future<void> _onStart(ServiceInstance service) async {
         await showErrorAlert(
           title: 'GPS is OFF!',
           body: 'Please turn on your location/GPS. Delivery tracking has stopped.',
+          alertType: 'gps_off',
         );
       }
     } catch (_) {}
+
+    // ── Battery low check (every 5 watchdog ticks ≈ every 5 min) ──
+    if (watchdogTicks % 5 == 0) {
+      try {
+        final batteryLevel = await const MethodChannel('bestseeds/device_info')
+            .invokeMethod<int>('getBatteryLevel');
+        if (batteryLevel != null && batteryLevel <= 20) {
+          TrackingLogger.log('🔋 battery low: $batteryLevel%');
+          updateNotification('Battery Low — $batteryLevel%! Please charge now.');
+          await showErrorAlert(
+            title: 'Battery Low — $batteryLevel%!',
+            body:
+                'Driver battery is critically low. Please charge your phone to keep live tracking active.',
+            alertType: 'battery_low',
+          );
+        }
+      } catch (_) {}
+    }
+
+    // ── Location-not-sending check ──
+    // GPS and internet are both up but the backend has not received a location
+    // update for more than 10 minutes (consecutiveFailures >= 5 with isOnline).
+    // This catches silent API failures, certificate errors, or a frozen service.
+    if (isOnline && consecutiveFailures >= 5) {
+      final sinceLastSend = lastSentAt == null
+          ? const Duration(hours: 1)
+          : DateTime.now().difference(lastSentAt!);
+      if (sinceLastSend >= const Duration(minutes: 10)) {
+        TrackingLogger.log(
+            '📡 location_not_sending: ${sinceLastSend.inMinutes}m since last successful send');
+        updateNotification(
+            'Location not reaching server — ${sinceLastSend.inMinutes}m silent');
+        await showErrorAlert(
+          title: 'Location Not Updating!',
+          body:
+              'Your location has not reached the server for ${sinceLastSend.inMinutes} minutes. '
+              'GPS and internet appear active — please restart the app if this persists.',
+          alertType: 'location_not_sending',
+        );
+      }
+    }
 
     final timeSinceLastPosition =
         DateTime.now().difference(lastStreamPositionTime);
@@ -1097,6 +1339,7 @@ Future<void> _onStart(ServiceInstance service) async {
     } else {
       print('BackgroundLocationService: Watchdog OK — last position '
           '${timeSinceLastPosition.inSeconds}s ago.');
+      updateNotification(trackingNotificationContent());
     }
 
     // ── WorkManager chain health check (every 30 min) ──
@@ -1321,7 +1564,12 @@ Future<bool> _onIosBackground(ServiceInstance service) async {
 /// that has no locality component still contributes — the locality we want
 /// usually appears in components of one of the first 2-3 results.
 ///
-/// Priority: locality (town/city) > sublocality (village/ward) > state only.
+/// Priority: sublocality (neighbourhood) > locality (city/town) > state only.
+///
+/// Output format:
+///   Urban  — "Madhapur, Hyderabad"       (sublocality + locality)
+///   Rural  — "Bhimanapalli, Andhra Pradesh" (locality + state, no sublocality)
+///   Bridge — "Annampalli, Andhra Pradesh" (locality or sublocality + state)
 Future<String?> reverseGeocodeHttp(double lat, double lng) async {
   try {
     final url = Uri.parse(
@@ -1331,8 +1579,9 @@ Future<String?> reverseGeocodeHttp(double lat, double lng) async {
       '&key=$_googleApiKey',
     );
 
-    // 3s timeout — geocode must not eat into the 12s location POST timeout.
-    final response = await http.get(url).timeout(const Duration(seconds: 3));
+    // 6s timeout — background isolate on mobile networks needs more headroom.
+    // Was 3s but caused frequent silent failures, keeping stale city names.
+    final response = await http.get(url).timeout(const Duration(seconds: 6));
     if (response.statusCode != 200) return null;
 
     final data = jsonDecode(response.body);
@@ -1344,9 +1593,12 @@ Future<String?> reverseGeocodeHttp(double lat, double lng) async {
     String? locality;
     String? subLocality;
     String? adminArea;
+    String? village; // administrative_area_level_3/4/5 — remote village name
 
-    // Scan all results (up to 5) to collect the best available components.
-    // locality is preferred — stop scanning once we have one.
+    // Scan up to 5 results to collect sublocality, locality, state, and village.
+    // Stop only once we have BOTH sublocality and locality — a single result
+    // usually carries all three in its address_components, but some results
+    // (e.g. highway/POI) omit locality, so keep scanning until we have both.
     for (var result in results.take(5)) {
       for (var component in result['address_components']) {
         final types = (component['types'] as List).cast<String>();
@@ -1360,20 +1612,39 @@ Future<String?> reverseGeocodeHttp(double lat, double lng) async {
         if (types.contains('administrative_area_level_1')) {
           adminArea ??= component['long_name'];
         }
+        // Remote villages often appear only at level 3/4/5 with no locality.
+        if (types.contains('administrative_area_level_3') ||
+            types.contains('administrative_area_level_4') ||
+            types.contains('administrative_area_level_5')) {
+          village ??= component['long_name'];
+        }
       }
-      if (locality != null) break; // locality found — precise enough
+      // Stop once we have everything we need
+      if (locality != null && subLocality != null && adminArea != null) break;
     }
 
-    // Build: "Annampalli, Andhra Pradesh" or "Pasuvullanka, Andhra Pradesh"
-    // Prefer locality > sublocality so we show the town, not the ward.
-    final place = locality ?? subLocality;
-    if (place == null && adminArea == null) return null;
-
-    return [place, adminArea]
-        .where((e) => e != null && e.isNotEmpty)
-        .join(', ');
+    // ── Build the display string ─────────────────────────────────────
+    // Urban  (has sublocality): "Madhapur, Hyderabad"
+    // Rural  (no sublocality):  "Bhimanapalli, Andhra Pradesh"
+    // Remote village (no locality, no sublocality): "Ananthagiri, Andhra Pradesh"
+    if (subLocality != null) {
+      // Urban: neighbourhood + city (or state if city unknown)
+      final context = locality ?? adminArea;
+      return [subLocality, context]
+          .where((e) => e != null && e.isNotEmpty)
+          .join(', ');
+    } else {
+      // Rural / remote village / highway: most-specific name + state
+      // Prefer locality; fall back to village name from deeper admin levels.
+      final place = locality ?? village;
+      if (place == null && adminArea == null) return null;
+      return [place, adminArea]
+          .where((e) => e != null && e.isNotEmpty)
+          .join(', ');
+    }
   } catch (e) {
     print('Background reverse geocoding failed: $e');
     return null;
   }
 }
+

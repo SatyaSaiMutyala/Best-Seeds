@@ -6,6 +6,7 @@ import 'package:bestseeds/driver/services/driver_storage_service.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Periodically checks driver device state (GPS, location, internet)
 /// and sends alerts to the backend every 5 minutes.
@@ -44,7 +45,15 @@ class TrackingAlertService {
       return;
     }
 
-    final issueType = await _detectIssue();
+    // Only send alerts while a journey is active. Without this check the
+    // service would send false gps_off / no_internet alerts whenever the
+    // driver opens the app without an active delivery.
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final journeyActive = prefs.getBool('bg_location_service_running') ?? false;
+    if (!journeyActive) return;
+
+    final issueType = await _detectIssue(prefs);
     if (issueType == null) {
       await _flushPendingAlert(token);
       _lastDetectedIssueType = null;
@@ -59,8 +68,7 @@ class TrackingAlertService {
     _lastDetectedIssueType = issueType;
 
     if (issueType == 'no_internet') {
-      // We cannot notify the backend while offline, so hold the alert until
-      // connectivity returns and the timer runs again.
+      // Cannot notify backend while offline — queue and retry when online.
       _pendingIssueType = issueType;
       print('TRACKING ALERT: Internet unavailable, alert queued for retry');
       return;
@@ -95,7 +103,7 @@ class TrackingAlertService {
   }
 
   /// Returns the issue type string or null if everything is normal.
-  static Future<String?> _detectIssue() async {
+  static Future<String?> _detectIssue(SharedPreferences prefs) async {
     // 1. Check internet connectivity
     try {
       final connectivity = await Connectivity().checkConnectivity();
@@ -132,12 +140,27 @@ class TrackingAlertService {
       if (Platform.isAndroid) {
         final batteryLevel =
             await _deviceInfoChannel.invokeMethod<int>('getBatteryLevel');
-        if (batteryLevel != null && batteryLevel <= 15) {
+        if (batteryLevel != null && batteryLevel <= 20) {
           return 'battery_low';
         }
       }
     } catch (_) {
       // Ignore battery read errors; they should not block tracking.
+    }
+
+    // 5. Detect if backend is not receiving location updates despite GPS+internet being OK.
+    // background_location_service writes 'last_location_sent_at' (ms since epoch) on each
+    // successful POST. If that timestamp is older than 10 minutes, something is silently broken.
+    try {
+      final lastSentMs = prefs.getInt('last_location_sent_at');
+      if (lastSentMs != null) {
+        final lastSent = DateTime.fromMillisecondsSinceEpoch(lastSentMs);
+        if (DateTime.now().difference(lastSent) > const Duration(minutes: 10)) {
+          return 'location_not_sending';
+        }
+      }
+    } catch (_) {
+      // Ignore read errors.
     }
 
     return null; // all good

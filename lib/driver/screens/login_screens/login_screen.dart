@@ -1,5 +1,7 @@
 import 'package:bestseeds/driver/controllers/driver_auth_controller.dart';
 import 'package:bestseeds/employee/screens/login_screens/employee_login_screen.dart';
+import 'package:bestseeds/screens/privacy_policy_screen.dart';
+import 'package:bestseeds/screens/terms_and_conditions_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -17,6 +19,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
 
   // Track if mobile number is valid (10 digits)
   bool _isValidMobile = false;
+  bool _isTermsAccepted = false;
 
   @override
   void initState() {
@@ -60,12 +63,10 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
           ),
         ),
         child: SafeArea(
-          child: CustomScrollView(
-            slivers: [
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Column(
-                  children: [
+          child: SingleChildScrollView(
+            reverse: true,
+            child: Column(
+            children: [
                     Padding(
                       padding: EdgeInsets.symmetric(
                         horizontal: width * 0.06,
@@ -110,7 +111,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
                               )
                             ],
                           ),
-                          SizedBox(height: height * 0.07),
+                          SizedBox(height: height * 0.04),
                           Text(
                             'Ready To Begin Your\nFirst Delivery',
                             style: TextStyle(
@@ -120,7 +121,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
                               height: 1.3,
                             ),
                           ),
-                          SizedBox(height: height * 0.02),
+                          SizedBox(height: height * 0.015),
                           Text(
                             'Just One Quick Step Remains To Get Started\nWith Your Deliveries.',
                             style: TextStyle(
@@ -132,20 +133,21 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
                         ],
                       ),
                     ),
-                    Flexible(
-                      child: Center(
-                        child: Image.asset(
-                          'assets/images/login_truck.png',
-                          width: width,
-                          fit: BoxFit.contain,
-                        ),
+                    SizedBox(
+                      height: height * 0.28,
+                      child: Image.asset(
+                        'assets/images/login_truck.png',
+                        width: width,
+                        fit: BoxFit.contain,
                       ),
                     ),
                     Container(
                       width: double.infinity,
-                      padding: EdgeInsets.symmetric(
-                        horizontal: width * 0.06,
-                        vertical: height * 0.035,
+                      padding: EdgeInsets.only(
+                        left: width * 0.06,
+                        right: width * 0.06,
+                        top: height * 0.03,
+                        bottom: height * 0.04,
                       ),
                       decoration: const BoxDecoration(
                         color: Colors.white,
@@ -204,13 +206,90 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
                             ),
                           ),
                           SizedBox(height: height * 0.03),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Checkbox(
+                                value: _isTermsAccepted,
+                                activeColor: const Color(0xFF0077C8),
+                                onChanged: (val) {
+                                  setState(() {
+                                    _isTermsAccepted = val ?? false;
+                                  });
+                                },
+                              ),
+                              Expanded(
+                                child: Wrap(
+                                  children: [
+                                    Text(
+                                      'I agree to the ',
+                                      style: TextStyle(
+                                        fontSize: width * 0.032,
+                                        color: Colors.grey.shade700,
+                                      ),
+                                    ),
+                                    GestureDetector(
+                                      onTap: () => Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (_) => const TermsAndConditionsScreen(),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        'Terms & Conditions',
+                                        style: TextStyle(
+                                          fontSize: width * 0.032,
+                                          color: const Color(0xFF0077C8),
+                                          fontWeight: FontWeight.w600,
+                                          decoration: TextDecoration.underline,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      ' and ',
+                                      style: TextStyle(
+                                        fontSize: width * 0.032,
+                                        color: Colors.grey.shade700,
+                                      ),
+                                    ),
+                                    GestureDetector(
+                                      onTap: () => Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (_) => const PrivacyPolicyScreen(),
+                                        ),
+                                      ),
+                                      child: Text(
+                                        'Privacy Policy',
+                                        style: TextStyle(
+                                          fontSize: width * 0.032,
+                                          color: const Color(0xFF0077C8),
+                                          fontWeight: FontWeight.w600,
+                                          decoration: TextDecoration.underline,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      ' of BestSeed.',
+                                      style: TextStyle(
+                                        fontSize: width * 0.032,
+                                        color: Colors.grey.shade700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          SizedBox(height: height * 0.02),
                           Obx(() => SizedBox(
                                 width: double.infinity,
                                 height: height * 0.06,
                                 child: ElevatedButton(
                                   onPressed:
                                       controller.isLoading.value ||
-                                              !_isValidMobile
+                                              !_isValidMobile ||
+                                              !_isTermsAccepted
                                           ? null
                                           : () {
                                               final mobile =
@@ -218,10 +297,11 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
                                               controller.sendOtp(mobile);
                                             },
                                   style: ElevatedButton.styleFrom(
-                                    backgroundColor: _isValidMobile
-                                        ? const Color(0xFF0077C8)
-                                        : const Color(0xFF0077C8)
-                                            .withValues(alpha: 0.4),
+                                    backgroundColor:
+                                        (_isValidMobile && _isTermsAccepted)
+                                            ? const Color(0xFF0077C8)
+                                            : const Color(0xFF0077C8)
+                                                .withValues(alpha: 0.4),
                                     disabledBackgroundColor:
                                         const Color(0xFF0077C8)
                                             .withValues(alpha: 0.4),
@@ -238,7 +318,7 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
                                           style: TextStyle(
                                             fontSize: 16,
                                             fontWeight: FontWeight.bold,
-                                            color: _isValidMobile
+                                            color: (_isValidMobile && _isTermsAccepted)
                                                 ? Colors.white
                                                 : Colors.white.withValues(
                                                     alpha: 0.7),
@@ -246,24 +326,11 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
                                         ),
                                 ),
                               )),
-                          SizedBox(height: height * 0.02),
-                          Center(
-                            child: Text(
-                              'By sign-in, I agree to the Terms & Conditions\nand Privacy Policy of BestSeed.',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                fontSize: width * 0.032,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
-                  ],
-                ),
-              ),
             ],
+          ),
           ),
         ),
       ),

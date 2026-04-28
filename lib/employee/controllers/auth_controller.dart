@@ -1,6 +1,7 @@
 import 'package:bestseeds/driver/models/user_model.dart';
 import 'package:bestseeds/employee/repository/auth_repository.dart';
 import 'package:bestseeds/employee/services/storage_service.dart';
+import 'package:bestseeds/routes/api_clients.dart';
 import 'package:bestseeds/routes/app_routes.dart';
 import 'package:bestseeds/services/notification_service.dart';
 import 'package:bestseeds/utils/app_snackbar.dart';
@@ -69,11 +70,41 @@ class AuthController extends GetxController {
               Get.offAllNamed(AppRoutes.employeeHome);
             },
           ));
+    } on EmployeeAlreadyLoggedInException catch (e) {
+      _showAlreadyLoggedInDialog(e.message);
     } catch (e) {
       AppSnackbar.error(extractErrorMessage(e));
     } finally {
       isLoading.value = false;
     }
+  }
+
+  void _showAlreadyLoggedInDialog(String message) {
+    Get.dialog(
+      PopScope(
+        canPop: false,
+        child: AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          title: const Text(
+            'Already Logged In',
+            style: TextStyle(fontWeight: FontWeight.w700),
+          ),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Get.back(),
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFF0077C8),
+              ),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      ),
+      barrierDismissible: false,
+    );
   }
 
   Future<void> setNewPassword(String password) async {
