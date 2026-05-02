@@ -3,11 +3,13 @@ import 'package:bestseeds/driver/services/background_location_service.dart';
 import 'package:bestseeds/driver/services/driver_storage_service.dart';
 import 'package:bestseeds/employee/repository/auth_repository.dart';
 import 'package:bestseeds/employee/services/storage_service.dart';
+import 'package:bestseeds/routes/app_constants.dart';
 import 'package:bestseeds/routes/app_routes.dart';
 import 'package:bestseeds/services/notification_service.dart';
 import 'package:bestseeds/widgets/login_location_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:http/http.dart' as http;
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -32,6 +34,21 @@ class _SplashScreenState extends State<SplashScreen> {
     // Check if employee is logged in
     final employee = await employeeStorage.getUser();
     if (employee != null) {
+      // Validate token — catches stale tokens restored from Android backup after reinstall
+      try {
+        final validate = await http.get(
+          Uri.parse(AppConstants.baseUrl + AppConstants.employeeProfileApi),
+          headers: {'Authorization': 'Bearer ${employee.token}', 'Accept': 'application/json'},
+        ).timeout(const Duration(seconds: 5));
+        if (validate.statusCode == 401) {
+          await employeeStorage.logout();
+          Get.offAllNamed(AppRoutes.login);
+          return;
+        }
+      } catch (_) {
+        // Network error / timeout — proceed with cached data (user may be offline)
+      }
+
       print('Splash: Employee found - ${employee.name}');
       // Register FCM token on auto-login
       NotificationService().registerEmployeeToken();
@@ -84,6 +101,21 @@ class _SplashScreenState extends State<SplashScreen> {
     // Check if driver is logged in
     final driver = await driverStorage.getDriver();
     if (driver != null) {
+      // Validate token — catches stale tokens restored from Android backup after reinstall
+      try {
+        final validate = await http.get(
+          Uri.parse(AppConstants.baseUrl + AppConstants.driverProfileApi),
+          headers: {'Authorization': 'Bearer ${driver.token}', 'Accept': 'application/json'},
+        ).timeout(const Duration(seconds: 5));
+        if (validate.statusCode == 401) {
+          await driverStorage.logout();
+          Get.offAllNamed(AppRoutes.login);
+          return;
+        }
+      } catch (_) {
+        // Network error / timeout — proceed with cached data (user may be offline)
+      }
+
       print('Splash: Driver found - ${driver.name}');
       // Register FCM token on auto-login
       NotificationService().registerDriverToken();

@@ -50,6 +50,7 @@
 		<string>fetch</string>
 		<string>location</string>
 		<string>processing</string>
+		<string>remote-notification</string>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Best Seeds needs your location to track delivery routes and update customers with live vehicle positions.</string>
