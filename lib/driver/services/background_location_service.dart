@@ -27,7 +27,7 @@ const String _baseUrl =
     'https://aqua.bestseed.in/api/';
 const String _locationUpdateEndpoint = 'driver/location/update';
 const String _trackingAlertEndpoint = 'driver/tracking-alert';
-const String _googleApiKey = 'AIzaSyDLVwCSkXWOjo49WNNwx7o0DSwomoFvbP0';
+const String _googleApiKey = 'AIzaSyA111b89Exrm83RRWF-2hP1EPeUxvos87I';
 const String _tokenKey = 'driver_token';
 const String _serviceRunningKey = 'bg_location_service_running';
 

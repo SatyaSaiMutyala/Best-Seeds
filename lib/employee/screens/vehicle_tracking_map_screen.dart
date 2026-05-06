@@ -162,17 +162,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   LatLng? _lastSpeedCalcPos;
   DateTime? _lastSpeedCalcTime;
 
-  // Preserved historical green path — the portion of the journey the
-  // truck has already driven, as it was BEFORE the most recent reroute.
-  // Prepended to the segment-slice green on every render so the
-  // travelled line never collapses back to a stub after a route change.
-  // See customer file (`Bestseeds-user/...`) for full rationale.
-  final List<LatLng> _preservedGreenPath = [];
-
   // Admin pickup marker (shown where admin set the start, may differ from driver pickup)
   LatLng? _homeMarkerLatLng;
-  // Approach polyline: admin_pickup → driver start (fetched once via Directions API)
-  List<LatLng> _approachPolyline = [];
 
   // Snap pipeline state
   LatLng? _lastAcceptedSnap;
@@ -236,6 +227,13 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
     _timeAgoTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
+    _startTrackingPipeline();
+  }
+
+  /// Wires up `_initializeMap` and the two periodic refresh timers. Pulled out
+  /// of `initState` so `didUpdateWidget` can re-run the same flow when the
+  /// caller swaps in a different booking on the same screen instance.
+  void _startTrackingPipeline() {
     // Start polling only after init completes to prevent race condition
     _initializeMap().whenComplete(() {
       if (!mounted) return;
@@ -246,6 +244,62 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         if (mounted && !_isRefreshing) _refreshData(forceRouteRefresh: true);
       });
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant VehicleTrackingMapScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // When the parent route swaps in a different booking on the same widget
+    // instance, every piece of in-memory tracking state (polylines, route,
+    // breadcrumbs, segment index, markers, timers) belongs to the previous
+    // booking and would render on top of the new one until the next refresh
+    // overwrites it. Force a full reset + re-init so the new booking starts
+    // from a clean slate.
+    if (oldWidget.booking.bookingId != widget.booking.bookingId) {
+      _liveTrackingTimer?.cancel();
+      _autoRefreshTimer?.cancel();
+      _markerAnimationTimer?.cancel();
+      _followResumeTimer?.cancel();
+
+      setState(() {
+        _polylines = {};
+        _smallMapMarkers = {};
+        _expandedMapMarkers = {};
+        _trackingData = null;
+        _fullPolyline = [];
+        _cumulativeDistances = [];
+        _currentSegmentIndex = 0;
+        _pickupLatLng = null;
+        _destinationLatLng = null;
+        _currentLatLng = null;
+        _driverBreadcrumbs = [];
+        _lastBreadcrumbTime = null;
+        _pointBuffer.clear();
+        _maxDriverFractionReached = 0.0;
+        _lastAcceptedSnap = null;
+        _lastAcceptedRaw = null;
+        _lastRenderedSnap = null;
+        _snapCacheInput = null;
+        _snapCacheOutput = null;
+        _consecutiveDeviations = 0;
+        _expandedSegmentIndex = null;
+        _subStopsCache = {};
+        _loadingSegment = null;
+        _fixedStopsGenerated = false;
+        _fixedStops = [];
+        _currentStopIndex = -1;
+        _currentBookingWaypointPriority = 999999;
+        _fullRoutePolyline = [];
+        _fullRouteCumulativeDistances = [];
+        _fullRouteDurationSeconds = 0;
+        _passedStopTimes = {};
+        _passedStopModes = {};
+        _isLoading = true;
+        _isLoadingRoute = true;
+      });
+
+      _startTrackingPipeline();
+    }
   }
 
   Future<void> _fetchTrackingData() async {
@@ -354,11 +408,10 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
               ? now.difference(_lastBreadcrumbTime!).inSeconds
               : 999;
           if (_driverBreadcrumbs.isEmpty) {
-            // Seed with pickup + current position (always snapped)
-            if (_pickupLatLng != null) {
-              _driverBreadcrumbs.add(_pickupLatLng!);
-            }
-            _driverBreadcrumbs.add(_snapToRoute(newPos));
+            // Seed along planned route — see _seedBreadcrumbsAlongPlannedRoute
+            // for why we slice _fullPolyline instead of just adding two
+            // endpoints (which produced the diagonal-through-buildings line).
+            _seedBreadcrumbsAlongPlannedRoute(newPos);
             _lastBreadcrumbTime = now;
             _pointBuffer.clear();
           } else if (_driverStatus == DriverStatus.idle) {
@@ -513,9 +566,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           _fullPolyline = [];
           _cumulativeDistances = [];
           _currentSegmentIndex = 0;
-          // Historical reroute snapshots belong to the previous journey.
-          // New pickup/drop invalidates them.
-          _preservedGreenPath.clear();
           // Same for the fraction watermark — new route starts at 0.
           _maxDriverFractionReached = 0.0;
           _driverBreadcrumbs = [];
@@ -534,7 +584,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           _fullRouteDurationSeconds = 0;
           _passedStopTimes = {};
           _passedStopModes = {};
-          _approachPolyline = [];
           _lastAcceptedSnap = null;
           _lastAcceptedRaw = null;
           _lastRenderedSnap = null;
@@ -557,11 +606,16 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           final animateFrom = _lastVehicleMarkerLatLng ?? previousVehiclePosition;
           if (animateFrom != null && _currentLatLng != null) {
             final moveDist = _haversineMeters(animateFrom, _currentLatLng!);
-            if (moveDist >= _breadcrumbMinDistance) {
+            // Marker has its own (much smaller) threshold than the breadcrumb-
+            // commit gate. During a reroute / slow turn the driver may move
+            // only ~10–25 m per poll — that's below `_breadcrumbMinDistance`
+            // so we shouldn't ADD a breadcrumb point, but the truck is still
+            // physically moving and the marker has to follow it.
+            if (moveDist >= 5) {
               _animateVehicleMarker(animateFrom, _currentLatLng!);
             } else {
-              // Below noise floor — hold previous position to prevent jitter
-              _currentLatLng = animateFrom;
+              // Sub-noise-floor move — keep `_currentLatLng` fresh but skip
+              // the animation so the marker doesn't jitter in place.
               _refreshCompletedPolylineFromTimeline();
             }
           } else {
@@ -585,11 +639,17 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             if (polylinePoints.isNotEmpty) {
               final deviation = _minDistanceToPolyline(_currentLatLng!, polylinePoints);
               final bool tooSlowToReroute = _estimatedSpeedKmh < 5;
-              if (deviation > _rerouteThreshold && !tooSlowToReroute) {
+              // >200m can't be GPS jitter — driver is on a different road.
+              // Bypass speed guard AND cooldown so the blue polyline updates
+              // immediately instead of waiting for the next cooldown window
+              // (which is what makes "back-and-reopen" appear to fix it).
+              final bool structuralDeviation = deviation > 120;
+
+              if ((deviation > _rerouteThreshold && !tooSlowToReroute) || structuralDeviation) {
                 _consecutiveDeviations++;
-                final shouldReroute = (deviation > _rerouteThreshold * 1.5 ||
-                    _consecutiveDeviations >= 2) &&
-                    _shouldRefreshRoute(forceRefresh: forceRouteRefresh);
+                final shouldReroute = structuralDeviation
+                    || ((deviation > _rerouteThreshold * 1.5 || _consecutiveDeviations >= 2)
+                        && _shouldRefreshRoute(forceRefresh: forceRouteRefresh));
                 if (shouldReroute) {
                   _consecutiveDeviations = 0;
                   await _rerouteFromDriverPosition();
@@ -687,35 +747,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       }
     }
 
-    // APPROACH POLYLINE: admin pickup → driver start
-    if (adminPickup != null && _currentLatLng != null && _approachPolyline.isEmpty) {
-      LatLng? adminLatLng;
-      if (adminPickup.lat != 0 && adminPickup.lng != 0) {
-        final candidate = LatLng(adminPickup.lat, adminPickup.lng);
-        if (_haversineMeters(candidate, _currentLatLng!) > 20) adminLatLng = candidate;
-      }
-      if (adminLatLng == null && adminPickup.name.isNotEmpty) {
-        final pickupName = _trackingData?.pickup.name ?? '';
-        if (adminPickup.name.trim().toLowerCase() != pickupName.trim().toLowerCase()) {
-          try {
-            final geocoded = await GoogleMapsService.geocodeAddress(adminPickup.name);
-            if (geocoded != null && _haversineMeters(geocoded, _currentLatLng!) > 20) {
-              adminLatLng = geocoded;
-            }
-          } catch (e) { debugPrint('⚠️ Admin pickup geocoding failed: $e'); }
-        }
-      }
-      if (adminLatLng != null) {
-        try {
-          final approach = await GoogleMapsService.getDirectionsHighRes(
-            origin: adminLatLng,
-            destination: _currentLatLng!,
-          );
-          if (approach.length >= 2) _approachPolyline = approach;
-        } catch (e) { debugPrint('⚠️ Approach polyline fetch failed: $e'); }
-      }
-    }
-
     // Build markers for both small and expanded views
     _buildMarkers();
 
@@ -787,19 +818,36 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             _destinationLatLng != null &&
             _haversineMeters(_currentLatLng!, _destinationLatLng!) < 30;
 
-        if (driverAtDestination && _fullPolyline.length >= 2) {
-          polylines.add(Polyline(
-            polylineId: const PolylineId('completed'),
-            points: List<LatLng>.from(_fullPolyline),
-            color: const Color(0xFF66BB6A),
-            width: 5,
-          ));
+        if (driverAtDestination) {
+          // ARRIVED: lock the green line to the ACTUAL driven path
+          // (server-snapped timeline) rather than the planned _fullPolyline,
+          // so the final view reflects every reroute / U-turn the driver
+          // actually took. Falls back to _fullPolyline only when timeline
+          // isn't ready (very rare at arrival).
+          final actualDriven = <LatLng>[
+            if (_pickupLatLng != null) _pickupLatLng!,
+            ...?_trackingData?.timeline
+                .where((t) => t.lat != null && t.lng != null)
+                .map((t) => LatLng(t.lat!, t.lng!)),
+          ];
+          final completedPoints = actualDriven.length >= 2
+              ? actualDriven
+              : List<LatLng>.from(_fullPolyline);
+          if (completedPoints.length >= 2) {
+            polylines.add(Polyline(
+              polylineId: const PolylineId('completed'),
+              points: completedPoints,
+              color: const Color(0xFF66BB6A),
+              width: 5,
+            ));
+          }
           _estimatedDuration = '';
         } else if (_currentLatLng != null) {
-          // Seed breadcrumbs (snapped on seed — prevents initial line through buildings)
+          // Seed breadcrumbs along the planned road polyline so the
+          // historical green line follows real roads, not a diagonal from
+          // pickup straight to the truck through buildings.
           if (_driverBreadcrumbs.isEmpty) {
-            if (_pickupLatLng != null) _driverBreadcrumbs.add(_pickupLatLng!);
-            _driverBreadcrumbs.add(_snapToRoute(_currentLatLng!));
+            _seedBreadcrumbsAlongPlannedRoute(_currentLatLng!);
             _lastBreadcrumbTime = DateTime.now();
           }
 
@@ -815,21 +863,16 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             } else {
               _lastRenderedSnap = snappedDriver;
 
-              // ── APPROACH (green) — admin pickup → driver start ──
-              if (_approachPolyline.length >= 2) {
-                polylines.add(Polyline(
-                  polylineId: const PolylineId('approach'),
-                  points: List<LatLng>.from(_approachPolyline),
-                  color: const Color(0xFF66BB6A),
-                  width: 5,
-                ));
-              }
-
-              final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
+              // GREEN (travelled) = pickup → API timeline (server-confirmed
+              // GREEN (travelled) = pickup + API timeline. The backend runs
+              // the timeline through Roads API snap-to-roads + interpolate
+              // before returning, so the line is road-aligned and reflects
+              // the actual driven road including U-turns.
               final greenPoints = <LatLng>[
-                ..._preservedGreenPath,
-                ..._fullPolyline.sublist(0, splitAt + 1),
-                snappedDriver,
+                if (_pickupLatLng != null) _pickupLatLng!,
+                ...?_trackingData?.timeline
+                    .where((t) => t.lat != null && t.lng != null)
+                    .map((t) => LatLng(t.lat!, t.lng!)),
               ];
               if (greenPoints.length >= 2) {
                 polylines.add(Polyline(
@@ -840,6 +883,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
                 ));
               }
 
+              final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
               final bluePoints = <LatLng>[
                 snappedDriver,
                 if (splitAt + 1 < _fullPolyline.length)
@@ -1001,10 +1045,21 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
   void _refreshCompletedPolylineFromTimeline() {
     if (_currentLatLng == null) return;
 
-    // Lock completed state when driver arrives at destination
+    // Lock completed state when driver arrives at destination — using the
+    // ACTUAL driven path (server-snapped timeline), NOT the originally-
+    // planned _fullPolyline.
     if (_destinationLatLng != null &&
         _haversineMeters(_currentLatLng!, _destinationLatLng!) < 30) {
-      if (_fullPolyline.length >= 2) {
+      final actualDriven = <LatLng>[
+        if (_pickupLatLng != null) _pickupLatLng!,
+        ...?_trackingData?.timeline
+            .where((t) => t.lat != null && t.lng != null)
+            .map((t) => LatLng(t.lat!, t.lng!)),
+      ];
+      final completedPoints = actualDriven.length >= 2
+          ? actualDriven
+          : List<LatLng>.from(_fullPolyline);
+      if (completedPoints.length >= 2) {
         final arrivedPolylines = _polylines
             .where((p) =>
                 p.polylineId.value != 'completed' &&
@@ -1012,7 +1067,7 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
             .toSet();
         arrivedPolylines.add(Polyline(
           polylineId: const PolylineId('completed'),
-          points: List<LatLng>.from(_fullPolyline),
+          points: completedPoints,
           color: const Color(0xFF66BB6A),
           width: 5,
         ));
@@ -1052,12 +1107,14 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
         return;
       }
 
-      final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
-
+      // GREEN (travelled) = pickup + API timeline (backend runs Roads API
+      // snap-to-roads + interpolate before returning). Same composition
+      // as the build-frame branch — see rationale comment there.
       final greenPoints = <LatLng>[
-        ..._preservedGreenPath,
-        ..._fullPolyline.sublist(0, splitAt + 1),
-        snappedPos,
+        if (_pickupLatLng != null) _pickupLatLng!,
+        ...?_trackingData?.timeline
+            .where((t) => t.lat != null && t.lng != null)
+            .map((t) => LatLng(t.lat!, t.lng!)),
       ];
       if (greenPoints.length >= 2) {
         updatedPolylines.add(
@@ -1069,6 +1126,8 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
           ),
         );
       }
+
+      final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
 
       // Blue: driver → destination (on-road)
       final bluePoints = <LatLng>[
@@ -1267,6 +1326,29 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       if (d < minDist) minDist = d;
     }
     return minDist;
+  }
+
+  /// Seed breadcrumbs when the screen opens mid-trip and the buffer is
+  /// still empty. We can't recover the *actual* path the driver drove
+  /// before the screen was open (the only record is the API timeline,
+  /// which is raw GPS — drawing it produces building-cuts), so we instead
+  /// seed with the road-snapped slice of [_fullPolyline] from start to
+  /// the driver's current segment. The line follows real roads even if
+  /// it doesn't reflect a pre-screen detour. Live updates after this
+  /// point come from real breadcrumbs and DO show actual detours/U-turns.
+  void _seedBreadcrumbsAlongPlannedRoute(LatLng currentPos) {
+    _driverBreadcrumbs.clear();
+    if (_pickupLatLng != null) {
+      _driverBreadcrumbs.add(_pickupLatLng!);
+    }
+    final snapped = _snapToRoute(currentPos);
+    if (_fullPolyline.length >= 2) {
+      final splitAt = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
+      if (splitAt >= 1) {
+        _driverBreadcrumbs.addAll(_fullPolyline.sublist(0, splitAt + 1));
+      }
+    }
+    _driverBreadcrumbs.add(snapped);
   }
 
   double _getBearing(LatLng start, LatLng end) {
@@ -1475,12 +1557,6 @@ class _VehicleTrackingMapScreenState extends State<VehicleTrackingMapScreen>
       routeWaypoints: wpLatLngs,
     );
     if (routeData.isEmpty) return;
-
-    if (_fullPolyline.length >= 2) {
-      final oldSplit = _currentSegmentIndex.clamp(0, _fullPolyline.length - 1);
-      if (oldSplit > 0) _preservedGreenPath.addAll(_fullPolyline.sublist(0, oldSplit + 1));
-      if (_currentLatLng != null) _preservedGreenPath.add(_currentLatLng!);
-    }
 
     _fullPolyline = routeData['polyline_points'] as List<LatLng>? ?? [];
     _cumulativeDistances = (routeData['cumulative_distances'] as List?)?.cast<double>() ?? [];

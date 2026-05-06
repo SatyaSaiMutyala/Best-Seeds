@@ -336,7 +336,7 @@ class LocationPickerScreen extends StatefulWidget {
 }
 
 class _LocationPickerScreenState extends State<LocationPickerScreen> {
-  static const String _apiKey = 'AIzaSyDLVwCSkXWOjo49WNNwx7o0DSwomoFvbP0';
+  static const String _apiKey = 'AIzaSyA111b89Exrm83RRWF-2hP1EPeUxvos87I';
 
   GoogleMapController? _mapController;
   LatLng? _selectedLocation;
