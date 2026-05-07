@@ -27,7 +27,7 @@ const String _baseUrl =
     'https://aqua.bestseed.in/api/';
 const String _locationUpdateEndpoint = 'driver/location/update';
 const String _trackingAlertEndpoint = 'driver/tracking-alert';
-const String _googleApiKey = 'AIzaSyDLVwCSkXWOjo49WNNwx7o0DSwomoFvbP0';
+const String _googleApiKey = 'AIzaSyA111b89Exrm83RRWF-2hP1EPeUxvos87I';
 const String _tokenKey = 'driver_token';
 const String _serviceRunningKey = 'bg_location_service_running';
 
@@ -1004,31 +1004,56 @@ Future<void> _onStart(ServiceInstance service) async {
     lastRawStreamPosition = null;
     consecutiveSameStreamPositions = 0;
 
+    // iOS REQUIRES AppleSettings with allowBackgroundLocationUpdates: true,
+    // otherwise Core Location kills the stream the moment the screen locks
+    // (or the app backgrounds). With it set, iOS keeps the stream alive in
+    // background indefinitely as long as updates keep flowing — this is the
+    // standard pattern used by every navigation app (Google Maps, Waze, etc).
+    final LocationSettings locationSettings = Platform.isIOS
+        ? AppleSettings(
+            accuracy: LocationAccuracy.best,
+            activityType: ActivityType.automotiveNavigation,
+            distanceFilter: 0,
+            // Critical: prevent iOS from auto-pausing the stream when it
+            // thinks the user has stopped (red light, parking). Without
+            // this, iOS silently pauses and never resumes.
+            pauseLocationUpdatesAutomatically: false,
+            // Critical: keeps the stream alive in background. Requires
+            // `location` in UIBackgroundModes (Info.plist already has it)
+            // and "Always Allow" location permission.
+            allowBackgroundLocationUpdates: true,
+            // Apple's required transparency: shows the blue status bar
+            // while tracking in background. Hiding it can lead to App
+            // Store rejection.
+            showBackgroundLocationIndicator: true,
+          )
+        : AndroidSettings(
+            accuracy: LocationAccuracy.best,
+            intervalDuration: _movingUpdateInterval,
+            distanceFilter: 0,
+            // Do NOT use forceLocationManager here.
+            //
+            // forceLocationManager: true bypasses Google's FusedLocationProvider
+            // (FLP) and forces Android's raw LocationManager. The difference matters
+            // critically when the screen is locked:
+            //
+            //   • FLP runs inside Google Play Services, which holds a privileged
+            //     PARTIAL_WAKE_LOCK and has Doze exemptions. A foreground service
+            //     using FLP continues to receive location callbacks during Doze.
+            //
+            //   • Android LocationManager has NO such exemptions. When Doze deep
+            //     mode kicks in (~30-40 min after screen lock + phone idle), the OS
+            //     defers LocationManager requests entirely — the stream goes silent
+            //     exactly matching the symptom the driver reported.
+            //
+            // Ghost-location protection (cell tower / WiFi jumps) is still provided
+            // by the accuracy > 100m guard in shouldSendPosition(). FLP with
+            // LocationAccuracy.best prefers GPS when available; non-GPS positions
+            // (accuracy > 100m) are rejected before being sent to the backend.
+          );
+
     positionSub = Geolocator.getPositionStream(
-      locationSettings: AndroidSettings(
-        accuracy: LocationAccuracy.best,
-        intervalDuration: _movingUpdateInterval,
-        distanceFilter: 0,
-        // Do NOT use forceLocationManager here.
-        //
-        // forceLocationManager: true bypasses Google's FusedLocationProvider
-        // (FLP) and forces Android's raw LocationManager. The difference matters
-        // critically when the screen is locked:
-        //
-        //   • FLP runs inside Google Play Services, which holds a privileged
-        //     PARTIAL_WAKE_LOCK and has Doze exemptions. A foreground service
-        //     using FLP continues to receive location callbacks during Doze.
-        //
-        //   • Android LocationManager has NO such exemptions. When Doze deep
-        //     mode kicks in (~30-40 min after screen lock + phone idle), the OS
-        //     defers LocationManager requests entirely — the stream goes silent
-        //     exactly matching the symptom the driver reported.
-        //
-        // Ghost-location protection (cell tower / WiFi jumps) is still provided
-        // by the accuracy > 100m guard in shouldSendPosition(). FLP with
-        // LocationAccuracy.best prefers GPS when available; non-GPS positions
-        // (accuracy > 100m) are rejected before being sent to the backend.
-      ),
+      locationSettings: locationSettings,
     ).listen(
       (position) async {
         if (shouldStop) return;

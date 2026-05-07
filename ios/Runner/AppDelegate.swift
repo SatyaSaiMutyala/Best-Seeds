@@ -3,6 +3,7 @@ import UIKit
 import GoogleMaps
 import Firebase
 import FirebaseMessaging
+import UserNotifications
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
@@ -14,9 +15,8 @@ import FirebaseMessaging
 
     GMSServices.provideAPIKey("AIzaSyDLVwCSkXWOjo49WNNwx7o0DSwomoFvbP0")
 
-    if #available(iOS 10.0, *) {
-      UNUserNotificationCenter.current().delegate = self
-    }
+    UNUserNotificationCenter.current().delegate = self
+
     application.registerForRemoteNotifications()
 
     GeneratedPluginRegistrant.register(with: self)
